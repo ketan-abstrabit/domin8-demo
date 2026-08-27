@@ -1,0 +1,51 @@
+# ===========================================================================
+# NO CLIENT DATA IN THIS REPO.
+#
+# The app is upload-driven: the master mapping table and every report arrive
+# through the browser and live only in the session's scratch workspace. Nothing
+# here should ever contain DOMIN8 sales, inventory, invoice or product data.
+#
+# If `git status` ever shows a .xlsx or .csv, stop and work out why.
+# ===========================================================================
+
+# --- data, in every shape it arrives in ---
+reports/
+exports/
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+*.tsv
+*.parquet
+*.zip
+~$*
+
+# --- secrets ---
+.streamlit/secrets.toml
+.env
+*.pem
+*.key
+sa*.json
+service-account*.json
+credentials*.json
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.ipynb_checkpoints/
+*.egg-info/
+
+# --- editors / os ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- local run artefacts ---
+*.log
+.streamlit/logs/
