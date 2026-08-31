@@ -55,39 +55,76 @@ overwrite an existing file, which is how `output/latest/` keeps stable links.
 
 ## 4. Wire up GitHub
 
-Repo → **Settings → Secrets and variables → Actions → New repository secret**:
+Repo → **Settings → Secrets and variables → Actions → New repository secret**.
+
+**Required — nothing runs without these two:**
 
 | Secret | Value |
 |---|---|
 | `GOOGLE_SA_KEY` | the entire contents of the JSON key file, pasted as-is |
 | `DRIVE_ROOT_ID` | the folder ID from step 1 |
+
+**Optional — email only. Skip the whole block until you want the digest sent:**
+
+| Secret | Value |
+|---|---|
 | `ALERT_RECIPIENTS` | who gets the digest, comma-separated |
 | `ALERT_ADMINS` | who gets told when a *run fails* — you, not the client |
 | `SMTP_USER` | the mailbox that sends |
 | `SMTP_PASS` | its app password (see below) |
-| `SMTP_FROM` | optional, defaults to `SMTP_USER` |
-| `SMTP_HOST` / `SMTP_PORT` | optional, defaults to `smtp.gmail.com` / `587` |
+| `SMTP_FROM` | defaults to `SMTP_USER` |
+| `SMTP_HOST` / `SMTP_PORT` | default to `smtp.gmail.com` / `587` |
+
+With the SMTP secrets absent, everything still builds and publishes; the run
+logs `email not sent — SMTP_USER / SMTP_PASS / recipients not all set` and
+carries on. The digest is still written to `output/latest/alert_digest.html`,
+so you can open it and see exactly what the email would have said. Adding the
+secrets later needs no code change and no redeploy.
 
 For a Workspace mailbox, `SMTP_PASS` is an **app password**, not the account
 password: Google Account → Security → 2-Step Verification → App passwords. If
 the admin has app passwords disabled, use any mailbox that allows them, or
 switch `SMTP_HOST` to your own provider.
 
-Leave the SMTP secrets out entirely and everything still works — the digest is
-written to `output/latest/alert_digest.html` and simply is not emailed.
+## 5. Put the first cycle's files in
 
-## 5. First run
+The run needs real inputs — an empty `input/` fails on purpose rather than
+publishing an empty report. Upload into the shared drive:
+
+```
+input/
+  Marketplace product id Master.xlsx     ← loose in input/, not in a subfolder
+  uniware/          Tally GST, Tally Return GST, Purchase Orders,
+                    Inventory Snapshot, Item Master
+  amazon vc/        the Sales and Inventory exports
+  retail stores/    the store sale and SOH files
+```
+
+Create the three subfolders yourself, or run the workflow once first — it
+creates them (and then fails on the empty input, which is expected).
+
+Files are matched **by content, not filename**, so date-stamped exports work
+unrenamed and the subfolder names are the only thing that has to be right.
+
+## 6. First run
 
 Repo → **Actions → DOMIN8 report → Run workflow**, tick **force**.
 
-Watch the log. If it fails, the reason is almost always one of the two
-mistakes above, and the error message names which.
+Watch the log. If it fails, it is almost always one of the mistakes above and
+the error message names which:
+
+| Message | Means |
+|---|---|
+| `storageQuotaExceeded` / `SHARED DRIVE` | the folder is in a My Drive, not a shared drive |
+| `cannot write to it` | service account has Viewer, needs Content manager |
+| `input/ is empty in Drive` | step 5 not done |
+| `No Google credentials` | `GOOGLE_SA_KEY` missing or not valid JSON |
 
 Then check the drive: `output/latest/` should hold ten files, `STATUS.txt`
 should say `Result : OK`, and `input/` should have gained a `reorder_status`
 Google Sheet.
 
-## 6. Hand over
+## 7. Hand over
 
 Give the client edit access to the shared drive and tell them three things:
 
