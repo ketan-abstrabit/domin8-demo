@@ -55,3 +55,9 @@ desktop.ini
 reports/_state/
 alert_state.json
 last_run.json
+
+# --- the bridge's dead-letter folder ---
+# The remote-devices bridge mounts this folder without delete permission, so
+# anything that needs removing (chiefly git's own .lock files, which it cannot
+# clean up afterwards) gets moved here instead. Contents are always disposable.
+_to_delete/
