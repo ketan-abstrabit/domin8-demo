@@ -1,0 +1,80 @@
+name: DOMIN8 report
+
+# The client's whole interface is a Drive folder. This is what watches it.
+#
+# Most firings do nothing: run_drive.py fingerprints the input folder and
+# stops in ~30 seconds if nothing has changed. Only a real upload triggers a
+# build. On the free tier that is roughly two hours of the 2,000-minute monthly
+# allowance for a private repo, and nothing at all for a public one.
+
+on:
+  schedule:
+    # Every two hours through the Indian working day (09:00-21:00 IST).
+    # GitHub cron is UTC; IST is UTC+5:30, hence the :30.
+    - cron: "30 3-15/2 * * *"
+    # Belt and braces on the 1st and 16th — their twice-monthly cycle. Forced,
+    # so the cycle report goes out even if nobody re-uploaded anything.
+    - cron: "30 2 1,16 * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild even if the inputs have not changed"
+        type: boolean
+        default: false
+      no_email:
+        description: "Build and publish, but send no digest"
+        type: boolean
+        default: false
+
+concurrency:
+  # Two runs writing to output/latest/ at once would interleave. Let the one in
+  # flight finish rather than cancelling it half-published.
+  group: domin8-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Build and publish
+        env:
+          GOOGLE_SA_KEY: ${{ secrets.GOOGLE_SA_KEY }}
+          DRIVE_ROOT_ID: ${{ secrets.DRIVE_ROOT_ID }}
+          ALERT_RECIPIENTS: ${{ secrets.ALERT_RECIPIENTS }}
+          ALERT_ADMINS: ${{ secrets.ALERT_ADMINS }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+        run: |
+          FLAGS=""
+          # The 1st/16th cycle run always rebuilds; the hourly poll does not.
+          if [ "${{ github.event.schedule }}" = "30 2 1,16 * *" ]; then
+            FLAGS="$FLAGS --force"
+          fi
+          if [ "${{ inputs.force }}" = "true" ]; then FLAGS="$FLAGS --force"; fi
+          if [ "${{ inputs.no_email }}" = "true" ]; then FLAGS="$FLAGS --no-email"; fi
+          python run_drive.py $FLAGS
+
+      - name: Keep the run log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-log-${{ github.run_number }}
+          path: |
+            reports/output/reconciliation_checks.csv
+            reports/output/exceptions.csv
+          if-no-files-found: ignore
+          retention-days: 14

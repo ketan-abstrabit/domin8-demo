@@ -1,0 +1,111 @@
+# DOMIN8 alert rules
+# ---------------------------------------------------------------------------
+# Every threshold the business wants to argue about lives here, not in Python.
+# Edit this file, commit, and the next run uses the new numbers — no code change.
+#
+# Each alert can be switched off with `enabled: false` without deleting its
+# settings, so a rule can be muted for a cycle and brought back.
+#
+# Severity drives the order of the digest: high -> medium -> info.
+# ---------------------------------------------------------------------------
+
+version: 1
+
+digest:
+  # Rows shown per alert in the email. The workbook always carries the full list.
+  top_n: 15
+  # Send even when nothing changed? False means a quiet fortnight is silent,
+  # which is the point — an email that always arrives stops being read.
+  send_when_no_change: false
+  # Recipients. Left empty here on purpose: real addresses belong in the
+  # ALERT_RECIPIENTS secret, not in a git repo. Anything listed here is added
+  # to whatever that secret contains.
+  to: []
+  subject: "DOMIN8 stock alerts — {date}"
+
+valuation:
+  # Value at risk uses the inventory valuation the source reports. Where a
+  # source sends units only (the store SOH files do), fall back to the average
+  # realised selling price for that SKU, then to the overall average.
+  fallback_to_asp: true
+
+alerts:
+
+  out_of_stock:
+    enabled: true
+    severity: high
+    label: "Out of stock"
+    why: "Selling SKUs with nothing left to sell."
+    # A SKU that never sold is not an out-of-stock problem, it is dead stock.
+    # Only flag things with real demand behind them.
+    min_monthly_ros: 0.5
+    # Rank on the sales this shortage costs per month, not on the value of the
+    # stock — which is zero, by definition, for everything on this list.
+    rank_by: revenue_at_risk
+
+  low_stock:
+    enabled: true
+    severity: high
+    label: "Low stock"
+    why: "Will run out before the next replenishment lands."
+    # Days of cover = units on hand / (monthly run rate / 30).
+    # Uniware POs have been landing in 7-15 days, so 21 gives a week of margin.
+    cover_days: 21
+    min_monthly_ros: 0.5
+    rank_by: revenue_at_risk
+
+  reorder_level:
+    enabled: true
+    severity: medium
+    label: "Reorder level reached"
+    why: "At or below the reorder point set in the merchandising workbook."
+    # Suppress lines a merchandiser has already actioned in reorder_status.
+    respect_manual_override: true
+    rank_by: revenue_at_risk
+
+  best_sellers:
+    enabled: true
+    severity: info
+    label: "Best sellers"
+    why: "Moving faster than the ageing bucket predicts. Protect the stock."
+    min_units_sold: 5
+    rank_by: revenue_at_risk
+
+  high_returns:
+    enabled: true
+    severity: high
+    label: "High returns"
+    why: "Return rate above tolerance — likely a fit, quality or listing problem."
+    return_rate: 0.15
+    # Volume floor, so a 1-of-2 return does not read as a 50% problem. Set to
+    # match your actual per-SKU volumes: at 5 the sample data surfaces two
+    # genuine offenders, at 10 it surfaces none.
+    min_units_sold: 5
+    rank_by: value_at_risk
+
+  slow_moving:
+    enabled: true
+    severity: medium
+    label: "Slow moving"
+    why: "Selling, but well below the rate its age implies."
+    # Ignore the long tail: a slow SKU with 4,000 rupees on it is not news.
+    min_value: 5000
+    rank_by: value_at_risk
+
+  dead_stock:
+    enabled: true
+    severity: high
+    label: "Dead stock"
+    why: "Capital sitting still. No movement, and old enough that it will not start."
+    ageing_buckets: [">1 year", ">2 years"]
+    min_units: 5
+    rank_by: value_at_risk
+
+  stock_ageing:
+    enabled: true
+    severity: medium
+    label: "Stock ageing"
+    why: "Crossed the ageing threshold. Discount or bundle before it is dead."
+    ageing_buckets: [">2 years"]
+    min_units: 5
+    rank_by: value_at_risk

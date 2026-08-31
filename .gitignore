@@ -49,3 +49,9 @@ desktop.ini
 # --- local run artefacts ---
 *.log
 .streamlit/logs/
+
+# --- drive mode ---
+# State belongs in the Drive folder's _state/, never in the repo.
+reports/_state/
+alert_state.json
+last_run.json

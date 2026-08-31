@@ -1,9 +1,22 @@
 # DOMIN8 — Omnichannel Reporting
 
 Reconciles sales, inventory and purchase data from Uniware, Amazon Vendor
-Central and the retail stores into one report, keyed on a master SKU table.
+Central and the retail stores into one report, keyed on a master SKU table —
+then alerts on what it finds.
 
-**Live app:** _(add the Streamlit URL once deployed)_
+**The client's interface is a Google Drive folder.** They drop files into
+`input/`; the finished workbooks appear in `output/latest/` and a digest lands
+in their inbox. No app, no login, no code on their machine.
+Setup: **[DRIVE_SETUP.md](DRIVE_SETUP.md)**.
+
+```
+Drive input/  ──▶  GitHub Actions  ──▶  Drive output/latest/
+                   (every 2h, free)     + email digest
+```
+
+`run_drive.py` is the only piece that knows Drive exists. The reconciler and
+the merchandising workbook read a folder and write a folder, exactly as they do
+locally, so everything stays testable offline.
 
 ---
 
@@ -34,18 +47,48 @@ verifier asserts none of them leak into the others.
 | **Omnichannel report** | 18 sheets — channel, stores, inventory, POs, returns, exceptions, audit, coverage |
 | **Dashboard** | self-contained HTML |
 | **Fact tables** | `fact_sales`, `fact_inventory`, `fact_purchase` |
+| **Alerts** | `Alerts.xlsx` — 8 alert types, one sheet each, plus what's new |
+| **Digest** | `alert_digest.html` — the email, also kept as a file |
+
+## Alerts
+
+Eight alerts, all from numbers the pipeline already computed: out of stock, low
+stock, reorder level reached, best sellers, high returns, slow moving, dead
+stock, stock ageing.
+
+Three things make them readable rather than noise:
+
+**Digest, not per-SKU.** 421 reorder emails is a spreadsheet with extra steps.
+One message per cycle, grouped, top 15 rows each, everything in the attachment.
+
+**State.** Each alert is classified NEW / ONGOING / RESOLVED against the
+previous run, so the same 401 out-of-stock SKUs do not shout every fortnight.
+The digest leads with what changed.
+
+**Money, not counts.** Dead, slow and ageing stock rank on capital sitting
+still. Out-of-stock, low-stock and reorder rank on the sales the shortage costs
+per month — ranking those on stock value would sort by a number that is zero by
+definition.
+
+Every threshold is in [`alert_rules.yaml`](alert_rules.yaml). Edit, commit,
+push; the next run uses it.
 
 ## Files
 
 ```
-app.py                 Streamlit UI (upload → run → view → download)
-run_pipeline.py        CLI orchestrator, for scheduled/local runs
+run_drive.py           Drive mode — pull, build, publish, alert  ← what CI runs
+drive_sync.py          the only Drive-aware module
+alerts.py              rules → events → digest
+alert_rules.yaml       every threshold, commented
+run_pipeline.py        CLI orchestrator, for local runs
 pipeline_config.py     paths, facility scope, windows
 reconcile.py           the reconciler — detection, dedup, identity resolution
 stock_vs_sales.py      the merchandising workbook
 check_reconcile.py     ties output back to the raw files (32 checks)
 validate_svs.py        re-checks the movement rules against a hand-built workbook
 uniware_exports.py     Uniware API puller
+app.py                 Streamlit UI — kept for internal debugging, not the client
+tests/                 offline end-to-end test of the whole Drive cycle
 ```
 
 ## Run locally
@@ -64,20 +107,28 @@ python run_pipeline.py --fetch    # pull Uniware first
 
 ## Deploy
 
-1. Push to GitHub (this repo).
-2. [share.streamlit.io](https://share.streamlit.io) → **New app** → pick this
-   repo → main file `app.py` → Deploy.
-3. App settings → make it private, add the viewers' email addresses.
-4. Secrets → paste from `.streamlit/secrets.toml.example` (only needed once the
-   Uniware fetch is enabled).
+See **[DRIVE_SETUP.md](DRIVE_SETUP.md)** — a Shared Drive, a service account,
+six GitHub secrets. About 30 minutes, no cost.
 
-Every `git push` redeploys in about a minute.
+Every `git push` updates the client's pipeline. They do nothing.
 
-### Known limitation of the hosted pilot
+### Verify it without touching Drive
 
-The container has **no persistent disk**. Merchandiser reorder notes and the
-purchase-order history do not survive a redeploy or a new session. Adding
-Supabase (`storage.py`) fixes this and is the intended next step.
+```bash
+python tests/test_drive_cycle.py
+```
+
+Runs the full pull → build → publish cycle against an in-memory fake Drive:
+change detection, in-place overwrite, archive retention, deleted files, alert
+state transitions, and both failure paths. 26 checks, about two minutes,
+offline.
+
+### State between runs
+
+`_state/` in the Drive folder holds the input fingerprint, the accumulated
+purchase-order history and the open-alert set. That is what lets the pipeline
+skip unchanged inputs, keep improving Ageing, and know which alerts are new.
+CI runners are disposable; Drive is the disk.
 
 ## Data
 

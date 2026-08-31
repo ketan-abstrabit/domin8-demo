@@ -1,5 +1,13 @@
 pandas>=2.0
 openpyxl>=3.1
 requests>=2.28
+PyYAML>=6.0
+
+# Drive mode (run_drive.py). Not needed for a purely local run.
+google-api-python-client>=2.100
+google-auth>=2.23
+
+# The Streamlit app is kept for internal use — it is the fastest way to see a
+# cycle's numbers while debugging. The client never opens it.
 streamlit>=1.30
 plotly>=5.18
