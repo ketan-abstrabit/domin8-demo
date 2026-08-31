@@ -1,0 +1,34 @@
+# Line-ending normalisation.
+#
+# This repo is edited on Windows and run on ubuntu-latest in GitHub Actions.
+# Without this, a file saved by a Windows editor turns every line into a
+# change: `uniware_exports.py` showed as 932 insertions and 932 deletions that
+# `git diff --ignore-cr-at-eol` reported as nothing at all. That noise hides
+# real changes and makes every diff useless for review.
+#
+# `text=auto` stores LF in the repo and converts on checkout, so the working
+# copy stays native and the history stays clean.
+
+* text=auto
+
+# Explicit where it matters.
+*.py    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.toml  text eol=lf
+*.gitignore text eol=lf
+
+# Windows shells need CRLF or they misbehave when double-clicked.
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# Never touch these.
+*.xlsx  binary
+*.xls   binary
+*.zip   binary
+*.png   binary
+*.jpg   binary
+*.pdf   binary
