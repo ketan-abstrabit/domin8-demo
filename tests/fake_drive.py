@@ -46,11 +46,15 @@ class FakeMedia:
 class FakeDrive:
     """One shared drive, one tree, no network."""
 
-    def __init__(self, drive_id="fakeDrive01", quota_bug=False):
+    def __init__(self, drive_id="fakeDrive01", quota_bug=False, lag=0):
         self.drive_id = drive_id
         # quota_bug reproduces the My Drive failure mode, so the error path and
         # its help text are covered too rather than only the happy one.
         self.quota_bug = quota_bug
+        # lag reproduces Drive's eventual consistency: something just created is
+        # missing from the next `lag` listings. Real Drive does this, and code
+        # that re-lists to find what it just made creates a duplicate instead.
+        self.lag = lag
         self._ids = itertools.count(1)
         self.nodes: dict[str, dict] = {}
         self.calls: list[str] = []
@@ -66,6 +70,7 @@ class FakeDrive:
             "trashed": False, "content": content,
             "modifiedTime": _now(),
             "md5Checksum": hashlib.md5(content).hexdigest() if content else None,
+            "_hide": 0,
         }
         return fid
 
@@ -118,12 +123,18 @@ class _Files:
         parent = m.group(1) if m else None
 
         def go():
-            files = [
-                {k: v for k, v in n.items() if k != "content"} | (
-                    {"size": str(len(n["content"]))} if n["mimeType"] != FOLDER_MIME else {})
-                for n in self.d.nodes.values()
-                if not n["trashed"] and parent in n["parents"]
-            ]
+            files = []
+            for n in self.d.nodes.values():
+                if n["trashed"] or parent not in n["parents"]:
+                    continue
+                if n.get("_hide", 0) > 0:      # not visible yet, see FakeDrive.lag
+                    n["_hide"] -= 1
+                    continue
+                row = {k: v for k, v in n.items()
+                       if k not in ("content", "_hide")}
+                if n["mimeType"] != FOLDER_MIME:
+                    row["size"] = str(len(n["content"]))
+                files.append(row)
             return {"files": files}
         return _Req(go)
 
@@ -178,6 +189,7 @@ class _Files:
                               body.get("mimeType") or _mime_of(media_body),
                               body["parents"][0], content)
             n = self.d.nodes[fid]
+            n["_hide"] = self.d.lag
             return {"id": n["id"], "name": n["name"],
                     "mimeType": n["mimeType"], "modifiedTime": n["modifiedTime"]}
         return _Req(go)

@@ -179,6 +179,24 @@ class DriveFS:
 
     # -- writing ----------------------------------------------------------
 
+    def _remember(self, parent_id: str, node: dict):
+        """Record a just-written child in the cache.
+
+        Drive's file list is eventually consistent: a folder created a moment
+        ago may be missing from the very next list call. Dropping the cache and
+        re-listing therefore does not find it, and the caller creates a second
+        one — which is exactly how a run ended up with two `output` folders.
+        Adding the node we already hold is both correct and one call cheaper.
+        """
+        kids = self._children.get(parent_id)
+        if kids is None:
+            return
+        for i, existing in enumerate(kids):
+            if existing["id"] == node["id"]:
+                kids[i] = {**existing, **node}
+                return
+        kids.append(node)
+
     def ensure_folder(self, parent_id: str, name: str) -> str:
         hit = self.find(parent_id, name, folder=True)
         if hit:
@@ -188,7 +206,8 @@ class DriveFS:
             fields="id, name, mimeType",
             supportsAllDrives=True,
         ).execute()
-        self._children.pop(parent_id, None)
+        self._remember(parent_id, {"id": made["id"], "name": name,
+                                   "mimeType": FOLDER_MIME})
         self.log(f"      created folder  {name}")
         return made["id"]
 
@@ -251,6 +270,7 @@ class DriveFS:
                         fields="id, name, modifiedTime",
                         supportsAllDrives=True,
                     ).execute()
+                    mime = existing["mimeType"]
                 else:
                     body = {"name": name, "parents": [parent_id]}
                     if convert_to:
@@ -260,7 +280,13 @@ class DriveFS:
                         fields="id, name, modifiedTime",
                         supportsAllDrives=True,
                     ).execute()
-                self._children.pop(parent_id, None)
+                    mime = convert_to or _guess_mime(local) or "application/octet-stream"
+                # Same consistency trap as folders: a second upload of the same
+                # name in one run must find this file, not create a duplicate.
+                self._remember(parent_id, {
+                    "id": got["id"], "name": name, "mimeType": mime,
+                    "modifiedTime": got.get("modifiedTime"),
+                })
                 return got
             except Exception as e:                       # noqa: BLE001
                 msg = str(e)

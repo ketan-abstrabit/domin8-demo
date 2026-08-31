@@ -644,22 +644,43 @@ where it does not — the workbook says which, per row.
 # email
 # ---------------------------------------------------------------------------
 
+def env(name: str, default: str = "") -> str:
+    """os.environ.get, but an empty value counts as unset.
+
+    GitHub Actions maps a secret that does not exist to the empty string rather
+    than leaving the variable out, so `os.environ.get("SMTP_PORT", "587")`
+    returns "" and never the default. Every optional setting has to go through
+    this or the defaults silently do not apply.
+    """
+    import os
+    return (os.environ.get(name) or "").strip() or default
+
+
 def send_email(subject: str, body_html: str, recipients: list[str],
                attachment: Path | None = None, log=print) -> bool:
     """SMTP, so it works with a Workspace mailbox or a Gmail app password."""
-    import os
     import smtplib
     from email.message import EmailMessage
 
-    host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-    port = int(os.environ.get("SMTP_PORT", "587"))
-    user = os.environ.get("SMTP_USER")
-    pw = os.environ.get("SMTP_PASS")
-    sender = os.environ.get("SMTP_FROM", user)
+    user = env("SMTP_USER")
+    pw = env("SMTP_PASS")
 
+    # Check before parsing anything. Reading the port first meant an unset
+    # SMTP_PORT blew up before this guard could report the real situation.
     if not (user and pw and recipients):
-        log("  email not sent — SMTP_USER / SMTP_PASS / recipients not all set")
+        missing = [n for n, v in (("SMTP_USER", user), ("SMTP_PASS", pw),
+                                  ("recipients", recipients)) if not v]
+        log(f"  email not sent — not configured ({', '.join(missing)})")
         return False
+
+    host = env("SMTP_HOST", "smtp.gmail.com")
+    raw_port = env("SMTP_PORT", "587")
+    try:
+        port = int(raw_port)
+    except ValueError:
+        log(f"  SMTP_PORT is not a number ({raw_port!r}) — using 587")
+        port = 587
+    sender = env("SMTP_FROM", user)
 
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -684,10 +705,9 @@ def send_email(subject: str, body_html: str, recipients: list[str],
 
 
 def recipients_from(rules: dict) -> list[str]:
-    import os
     listed = list((rules.get("digest") or {}).get("to") or [])
-    env = os.environ.get("ALERT_RECIPIENTS", "")
-    listed += [a.strip() for a in re.split(r"[,;\s]+", env) if a.strip()]
+    listed += [a.strip() for a in re.split(r"[,;\s]+", env("ALERT_RECIPIENTS"))
+               if a.strip()]
     seen, out = set(), []
     for a in listed:
         if a.lower() not in seen:
@@ -745,7 +765,14 @@ def run(report_dir: Path, rules_path: Path, state_path: Path,
         else:
             subject = dcfg.get("subject", "DOMIN8 stock alerts — {date}").format(
                 date=run_id, new=new_n, open=len(current))
-            sent = send_email(subject, body, recipients_from(rules), wb, log=log)
+            # Email is the last and least important thing this does, and it
+            # depends on a third party. It must never take the cycle down with
+            # it: the reports are already built and still need publishing.
+            try:
+                sent = send_email(subject, body, recipients_from(rules), wb, log=log)
+            except Exception as exc:                            # noqa: BLE001
+                log(f"  ! digest not sent: {type(exc).__name__}: {exc}")
+                log("    the reports are unaffected and will still be published")
 
     capital = 0.0
     if len(current):

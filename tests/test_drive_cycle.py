@@ -11,8 +11,10 @@ would otherwise only be discovered in production:
      link shared with the client keeps working
   6  a file deleted in Drive stops appearing in the report
   7  alerts move NEW -> ONGOING across runs instead of re-firing
-  8  a My Drive folder fails loudly, with the fix in the message
-  9  a mid-run failure still leaves a readable STATUS.txt
+  8  Drive's eventual consistency does not produce duplicate folders or files
+  9  a broken or absent mail setup never takes the run down with it
+ 10  a My Drive folder fails loudly, with the fix in the message
+ 11  a mid-run failure still leaves a readable STATUS.txt
 
     python tests/test_drive_cycle.py [--keep]
 """
@@ -20,6 +22,7 @@ would otherwise only be discovered in production:
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -179,7 +182,52 @@ def main():
     notes = status_text(d)
     check("STATUS.txt reports the alert counts", "open alerts" in notes)
 
-    print("\n[7] My Drive is rejected with the fix in the message")
+    print("\n[7] Drive's eventual consistency does not duplicate folders")
+    # A folder created a moment ago can be missing from the very next listing.
+    # Code that re-lists to find what it just made creates a second one — which
+    # is how a live run ended up with two `output` folders side by side.
+    lagged = FD.FakeDrive(lag=3)
+    lagged.mkdir("input", lagged.root_id)
+    FD.install(DS, lagged)
+    ws = DS.Workspace(DS.DriveFS(lagged, lagged.root_id, log=lambda *a: None))
+    tops = [n["name"] for n in lagged.nodes.values()
+            if not n["trashed"] and lagged.root_id in n["parents"]]
+    check("no duplicate top-level folders under lag",
+          len(tops) == len(set(tops)), ", ".join(sorted(tops)))
+    outs = [n for n in lagged.nodes.values()
+            if not n["trashed"] and n["name"] == "output"]
+    check("exactly one output/ folder", len(outs) == 1, f"{len(outs)} found")
+    # Two uploads of the same name in one run must overwrite, not duplicate.
+    tmp = Path("/tmp/_dup_probe.txt")
+    tmp.write_text("one")
+    a1 = ws.fs.upload(tmp, ws.latest, "probe.txt")
+    tmp.write_text("two")
+    a2 = ws.fs.upload(tmp, ws.latest, "probe.txt")
+    tmp.unlink(missing_ok=True)
+    check("re-upload overwrites under lag", a1["id"] == a2["id"],
+          f"{a1['id']} vs {a2['id']}")
+
+    print("\n[8] email never takes the run down with it")
+    import alerts
+    os.environ.update(SMTP_PORT="", SMTP_HOST="", SMTP_USER="", SMTP_PASS="")
+    try:
+        ok = alerts.send_email("s", "<p>b</p>", [])
+        check("empty SMTP_PORT does not raise", ok is False)
+    except Exception as e:                                      # noqa: BLE001
+        check("empty SMTP_PORT does not raise", False, f"{type(e).__name__}: {e}")
+    os.environ.update(SMTP_USER="u", SMTP_PASS="p", SMTP_PORT="not-a-number")
+    try:
+        alerts.send_email("s", "<p>b</p>", ["x@y.z"])
+        check("junk SMTP_PORT falls back to 587", False, "should have tried to connect")
+    except ValueError as e:
+        check("junk SMTP_PORT falls back to 587", False, f"still parsing: {e}")
+    except Exception:                                           # noqa: BLE001
+        # Any connection error is fine — the point is it got past parsing.
+        check("junk SMTP_PORT falls back to 587", True)
+    for k in ("SMTP_PORT", "SMTP_HOST", "SMTP_USER", "SMTP_PASS"):
+        os.environ.pop(k, None)
+
+    print("\n[9] My Drive is rejected with the fix in the message")
     bad = FD.FakeDrive(quota_bug=True)
     FD.install(DS, bad)
     try:
@@ -189,7 +237,7 @@ def main():
         check("My Drive rejected before any work", "SHARED DRIVE" in str(e).upper())
         check("error names the fix", "Content manager" in str(e))
 
-    print("\n[8] a broken run still leaves a readable STATUS.txt")
+    print("\n[10] a broken run still leaves a readable STATUS.txt")
     FD.install(DS, d)
     empty = FD.FakeDrive()
     empty.mkdir("input", empty.root_id)
