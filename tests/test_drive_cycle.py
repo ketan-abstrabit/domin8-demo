@@ -90,6 +90,15 @@ def latest_names(d: FD.FakeDrive) -> dict[str, str]:
             if not n["trashed"] and latest["id"] in n["parents"]}
 
 
+def bi_sheets(d: FD.FakeDrive) -> dict[str, dict]:
+    out = d.find(d.root_id, "output")
+    bi = d.find(out["id"], "bi")
+    if not bi:
+        return {}
+    return {n["name"]: n for n in d.nodes.values()
+            if not n["trashed"] and bi["id"] in n["parents"]}
+
+
 def status_text(d: FD.FakeDrive) -> str:
     n = d.find(d.root_id, "STATUS.txt")
     return n["content"].decode() if n else ""
@@ -131,6 +140,11 @@ def main():
     check("reorder_status seeded as a Sheet in input/",
           (d.find(d.find(d.root_id, "input")["id"], "reorder_status") or {})
           .get("mimeType") == FD.SHEET_MIME)
+    bi = bi_sheets(d)
+    check("fact tables published to output/bi/", len(bi) == 3,
+          ", ".join(sorted(bi)) or "none")
+    check("fact tables are Google Sheets, not CSV files",
+          all(n["mimeType"] == FD.SHEET_MIME for n in bi.values()))
 
     print("\n[2] runs with nothing changed")
     # The first run seeds reorder_status into input/, so the run after it sees
@@ -205,12 +219,19 @@ def main():
     # property under test is that a *republish over an existing file* keeps its
     # id, so the baseline has to be the current set.
     before = latest_names(d)
+    bi_before = {k: v["id"] for k, v in bi_sheets(d).items()}
     rc = run_cycle(d.root_id, force=True)
     after = latest_names(d)
+    bi_after = bi_sheets(d)
     check("forced run rebuilds", rc == 0 and "SKIPPED" not in status_text(d))
     check("file IDs survive a republish — shared links keep working",
           all(before.get(k) == after.get(k) for k in before if k in after),
           f"{len(before)} tracked")
+    check("fact table IDs survive a republish — BI data sources keep working",
+          bi_before and all(bi_before[k] == bi_after[k]["id"] for k in bi_before),
+          f"{len(bi_before)} tracked")
+    check("republished fact tables are still Google Sheets",
+          all(n["mimeType"] == FD.SHEET_MIME for n in bi_after.values()))
 
     print("\n[4] a changed input triggers a rebuild")
     inp = d.find(d.root_id, "input")["id"]

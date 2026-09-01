@@ -202,6 +202,7 @@ def cycle(args) -> int:
         # -- 5  push -----------------------------------------------------
         log("\n[5] publishing to Drive")
         links = DS.push_outputs(ws, C.OUTPUT, stamp, log=log)
+        DS.push_bi_tables(ws, C.OUTPUT, log=log)
         ws.save_state_file(STATE_DIR / ALERT_STATE)
         if C.PO_HISTORY_FILE.exists():
             ws.save_state_file(C.PO_HISTORY_FILE)

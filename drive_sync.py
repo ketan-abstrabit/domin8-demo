@@ -18,6 +18,7 @@ Expected layout in Drive (created on first run if missing):
       output/
         latest/                         overwritten every run, file IDs kept
         archive/2026-08-31_1430/        every previous run
+        bi/                             fact tables as Sheets, for BI tools
       STATUS.txt                        last run: when, what it read, pass/fail
       _state/                           fingerprints, PO history, alert state
 
@@ -284,6 +285,10 @@ class DriveFS:
         Overwrites in place with files().update so the Drive file ID survives —
         anyone who bookmarked last week's report or embedded its link keeps a
         working link instead of a 404 every fortnight.
+
+        `convert_to` applies on update as well as create: without the mimeType
+        on the update body, re-uploading CSV bytes over a Google Sheet turns it
+        back into a plain CSV and every data source bound to it breaks.
         """
         name = name or local.name
         existing = self.find(parent_id, name, folder=False)
@@ -293,11 +298,13 @@ class DriveFS:
             try:
                 if existing:
                     got = self.svc.files().update(
-                        fileId=existing["id"], media_body=media,
+                        fileId=existing["id"],
+                        body={"mimeType": convert_to} if convert_to else None,
+                        media_body=media,
                         fields="id, name, modifiedTime",
                         supportsAllDrives=True,
                     ).execute()
-                    mime = existing["mimeType"]
+                    mime = convert_to or existing["mimeType"]
                 else:
                     body = {"name": name, "parents": [parent_id]}
                     if convert_to:
@@ -394,6 +401,7 @@ class Workspace:
         self.output = fs.ensure_path("output")
         self.latest = fs.ensure_path("output", "latest")
         self.archive = fs.ensure_path("output", "archive")
+        self.bi = fs.ensure_path("output", "bi")
         self.state = fs.ensure_path("_state")
         self.sub = {}
         for key in FOLDER_ALIASES:
@@ -556,6 +564,32 @@ def push_outputs(ws: Workspace, local_output: Path, stamp: str, log=print) -> di
         log(f"      {f.stat().st_size:>10,}  {f.name}")
 
     prune_archive(ws, log=log)
+    return links
+
+
+# The fact tables, republished as Google Sheets for BI tools. Reporting tools
+# read native Sheets, not the .xlsx and .csv files in latest/, so the same rows
+# are published in a format they can connect to.
+BI_TABLES = ("fact_sales.csv", "fact_inventory.csv", "fact_purchase.csv")
+
+
+def push_bi_tables(ws: Workspace, local_output: Path, log=print) -> dict:
+    """Publish the fact tables to output/bi/ as Google Sheets.
+
+    Created once, then overwritten in place. A BI data source binds to a file
+    ID, so holding the ID steady is what keeps a dashboard working across runs
+    without anyone re-linking it.
+    """
+    links = {}
+    for fname in BI_TABLES:
+        f = local_output / fname
+        if not f.exists():
+            log(f"      {fname} not produced this run — skipped")
+            continue
+        sheet = f.stem
+        got = ws.fs.upload(f, ws.bi, sheet, convert_to=SHEET_MIME)
+        links[sheet] = f"https://docs.google.com/spreadsheets/d/{got['id']}/edit"
+        log(f"      {sheet}  (Google Sheet)")
     return links
 
 

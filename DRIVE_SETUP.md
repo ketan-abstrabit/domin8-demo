@@ -120,9 +120,9 @@ the error message names which:
 | `input/ is empty in Drive` | step 5 not done |
 | `No Google credentials` | `GOOGLE_SA_KEY` missing or not valid JSON |
 
-Then check the drive: `output/latest/` should hold ten files, `STATUS.txt`
-should say `Result : OK`, and `input/` should have gained a `reorder_status`
-Google Sheet.
+Then check the drive: `output/latest/` should hold ten files, `output/bi/`
+three Google Sheets, `STATUS.txt` should say `Result : OK`, and `input/` should
+have gained a `reorder_status` Google Sheet.
 
 ## 7. Give the client the button
 
@@ -146,6 +146,34 @@ Give the client edit access to the shared drive and tell them three things:
   says when the last run happened, what it read, and whether it worked.
 
 ---
+
+## Connecting Looker Studio
+
+Looker Studio cannot read the `.xlsx` and `.csv` files in `output/latest/`. Its
+Sheets connector opens native Google Sheets only, and the "Google Drive"
+connector in the gallery is a third-party one that lists files and folders —
+metadata, not their contents. So each run also republishes the three fact
+tables to `output/bi/` as Google Sheets, which the connector does read.
+
+One-time, per table:
+
+1. Looker Studio → **Create → Data source → Google Sheets**.
+2. **Shared drives** tab → `DOMIN8 Reporting` → `output` → `bi` →
+   `fact_sales`, `fact_inventory` or `fact_purchase`.
+3. Tick **Use first row as headers**. Connect.
+
+A data source binds to a Drive file ID, and the run overwrites these sheets in
+place rather than replacing them, so the IDs hold and the dashboard survives
+every run without re-linking. Deleting a sheet from `bi/` breaks that — the
+next run creates a new file with a new ID and the data source has to be
+repointed.
+
+Set **Data freshness** to 15 minutes on each source. The sheets only change
+when a run happens, so anything shorter just adds queries.
+
+The data source runs on the credentials of whoever creates it. Use an account
+that will keep access to the shared drive — if it is a personal one and that
+person leaves, every report built on it stops.
 
 ## When it runs
 
@@ -206,6 +234,7 @@ input/                    the client fills this
 output/
   latest/                 overwritten each run, file IDs preserved
   archive/<date_time>/    last 12 cycles
+  bi/                     the three fact tables as Google Sheets
 STATUS.txt                last run: when, what it read, pass/fail
 _state/                   fingerprints, PO history, alert state — leave alone
 ```
