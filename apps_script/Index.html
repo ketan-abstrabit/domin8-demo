@@ -131,7 +131,8 @@
       <div class="links" id="links"></div>
     </div>
   </div>
-  <div class="note">Reports take three to four minutes. You can close this page &mdash; it keeps running.</div>
+  <div class="note">Reports take three to four minutes. You can close this page &mdash; it keeps running.<br>
+    <span id="build" style="opacity:.7"></span></div>
 </div>
 
 <script>
@@ -323,6 +324,25 @@
   refresh();
   links();
   lastFetch();
+
+  // Print which code is actually deployed. Editing the files does not update
+  // the live app — only a new deployment version does — so a stale deployment
+  // is otherwise indistinguishable from a broken one.
+  google.script.run.withSuccessHandler(function (b) {
+    document.getElementById('build').textContent =
+      'build ' + b.build + (b.has_fetch ? '' : '  — Fetch unavailable in this deployment');
+    if (!b.has_fetch) {
+      var f = document.getElementById('fetch');
+      f.disabled = true;
+      setFetch('This deployment does not include the fetch function. ' +
+               'Abstrabit needs to redeploy a new version.', true);
+    }
+  }).withFailureHandler(function () {
+    document.getElementById('build').textContent =
+      'build unknown — this deployment predates the version marker';
+    var f = document.getElementById('fetch');
+    if (f) { f.disabled = true; }
+  }).buildInfo();
   // If a run happens to be in flight when the page opens, follow it.
   setTimeout(function () {
     var el = document.getElementById('state');

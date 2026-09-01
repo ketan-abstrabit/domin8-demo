@@ -22,9 +22,30 @@
  *   Then run selftest() once from the editor and read the log.
  */
 
+/**
+ * Bump this whenever Code.gs or Index.html changes.
+ *
+ * Editing the files does not change the live web app — only Deploy > Manage
+ * deployments > New version does. That distinction has cost real debugging
+ * time twice, with no way to tell a stale deployment from a broken one. The
+ * page prints this in its footer and selftest reports it, so "which code is
+ * actually running" is a five-second question instead of an argument.
+ */
+var BUILD = '2026-09-01c  (fetch button)';
+
 var EVENT_TYPE = 'run-report';
 var COOLDOWN_SECONDS = 120;
 var API = 'https://api.github.com';
+
+
+/** What the deployed code can do. The page uses this to prove it is current. */
+function buildInfo() {
+  return {
+    build: BUILD,
+    has_fetch: (typeof triggerFetch === 'function'),
+    has_status: (typeof fetchStatus === 'function')
+  };
+}
 
 
 // ---------------------------------------------------------------------------
@@ -349,6 +370,15 @@ function selftest() {
       lines.push('  FAIL  ' + name + '\n          ' + String(err.message || err));
     }
   }
+
+  check('deployed build', function () {
+    var b = buildInfo();
+    if (!b.has_fetch) {
+      throw new Error('this Code.gs has no triggerFetch — the Fetch button ' +
+                      'cannot work. Paste the current apps_script/Code.gs.');
+    }
+    return b.build;
+  });
 
   check('GITHUB_REPO is set', function () {
     var r = prop_('GITHUB_REPO', true);
