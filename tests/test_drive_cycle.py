@@ -29,6 +29,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -117,21 +118,32 @@ def status_text(d: FD.FakeDrive) -> str:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--sample", type=Path,
-                    default=Path("/home/claude/deploy/reports/input"))
+    # The repo's own reports/input, so this runs anywhere without arguments.
+    ap.add_argument("--sample", type=Path, default=ROOT / "reports" / "input")
     ap.add_argument("--keep", action="store_true")
     a = ap.parse_args()
 
-    if not a.sample.exists():
-        sys.exit(f"sample inputs not found: {a.sample}\n"
-                 "Point --sample at a reports/input folder.")
+    if not a.sample.exists() or not any(a.sample.rglob("*.csv")):
+        sys.exit(f"No sample inputs at {a.sample}\n"
+                 "Put a cycle's files under reports/input/ (or pass --sample\n"
+                 "pointing at a folder that has them) and run this again.")
+
+    # Snapshot the sample before anything is wiped.
+    #
+    # The default sample IS reports/input, and the run below empties that
+    # folder because the fake Drive has to be the only source of truth. Reading
+    # from a copy means the default can be the obvious path instead of one that
+    # only existed on the machine this was written on.
+    holding = Path(tempfile.mkdtemp(prefix="d8_sample_"))
+    shutil.copytree(a.sample, holding / "input")
+    sample = holding / "input"
 
     # A clean slate: the fake drive is the only source of truth.
     for p in (C.INPUT, C.OUTPUT, C.REPORTS / "_state"):
         shutil.rmtree(p, ignore_errors=True)
 
     print("\n[setup]")
-    d = seed(a.sample)
+    d = seed(sample)
     FD.install(DS, d)
 
     print("\n[1] first run")
@@ -453,8 +465,13 @@ def main():
     check("failure explains what to do",
           "master mapping table" in status_text(empty).lower())
 
+    # Put reports/input back. Running the tests must not cost someone their
+    # sample data — they would have no way to get it back.
+    shutil.rmtree(C.INPUT, ignore_errors=True)
+    shutil.copytree(sample, C.INPUT)
+    shutil.rmtree(holding, ignore_errors=True)
     if not a.keep:
-        for p in (C.INPUT, C.OUTPUT, C.REPORTS / "_state"):
+        for p in (C.OUTPUT, C.REPORTS / "_state"):
             shutil.rmtree(p, ignore_errors=True)
 
     bad_n = sum(1 for r, *_ in results if r == FAIL)
