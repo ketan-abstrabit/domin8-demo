@@ -203,12 +203,20 @@ function runStatus() {
     var list = (runs && runs.workflow_runs) || [];
     if (list.length) {
       var r = list[0];
+      // A fetch and a build look identical here unless the event type is
+      // read. Telling someone "building the report" while it is actually
+      // talking to Uniware is worse than saying nothing.
+      var isFetch = (r.display_title || '').indexOf('fetch-uniware') > -1;
+      out.kind = isFetch ? 'fetch' : 'report';
       if (r.status === 'queued' || r.status === 'in_progress' ||
           r.status === 'waiting' || r.status === 'requested') {
         out.phase = 'running';
-        out.label = (r.status === 'queued') ? 'Queued' : 'Building the report';
+        out.label = (r.status === 'queued') ? 'Queued'
+                  : isFetch ? 'Pulling from Uniware' : 'Building the report';
         out.detail = 'Started ' + ago_(r.run_started_at || r.created_at) +
-                     '. This usually takes three to four minutes.';
+                     (isFetch ? '. Uniware builds each export on its side, '
+                              + 'so this can take several minutes.'
+                              : '. This usually takes three to four minutes.');
       } else if (r.conclusion === 'success') {
         out.phase = 'ok';
         out.label = 'Last run finished';

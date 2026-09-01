@@ -168,6 +168,8 @@
     btn.textContent = 'Run the report';
   }
 
+  var fetchPoll = null, fetchWasAt = null, fetchStarted = 0;
+
   function fetchNow() {
     var btn = document.getElementById('fetch');
     btn.disabled = true;
@@ -182,6 +184,7 @@
           setFetch(res.message + ' The files appear in input/uniware when it ' +
                    'finishes — then press Run.', false);
           startPolling();
+          watchFetch();
         }
         resetFetch();
       })
@@ -204,6 +207,50 @@
     var el = document.getElementById('fetchState');
     el.className = 'fs' + (bad ? ' bad' : '');
     el.textContent = msg;
+  }
+
+  /**
+   * Follow the pull to a conclusion.
+   *
+   * Without this the line said "pulling" for ever — on success, on failure and
+   * when nothing had started at all — so the page could not tell anyone which
+   * of the three had happened. It watches _state/last_fetch.json for a run_id
+   * different from the one present when the button was pressed, and gives up
+   * after twelve minutes rather than spinning all afternoon.
+   */
+  function watchFetch() {
+    fetchStarted = Date.now();
+    google.script.run.withSuccessHandler(function (f) {
+      fetchWasAt = (f && f.known) ? (f.run_id || '') : '';
+      if (fetchPoll) clearInterval(fetchPoll);
+      fetchPoll = setInterval(pollFetch, 8000);
+    }).fetchStatus();
+  }
+
+  function pollFetch() {
+    var mins = Math.round((Date.now() - fetchStarted) / 60000);
+    if (mins >= 12) {
+      clearInterval(fetchPoll); fetchPoll = null;
+      setFetch('Still no result after 12 minutes. Check with Abstrabit — the ' +
+               'previous files in input/uniware are untouched, and Run still ' +
+               'works on them.', true);
+      return;
+    }
+    google.script.run.withSuccessHandler(function (f) {
+      if (!f || !f.known || (f.run_id || '') === fetchWasAt) {
+        setFetch('Pulling from Uniware… ' + (mins < 1 ? 'under a minute'
+                 : mins + ' minute' + (mins === 1 ? '' : 's')) + ' so far.', false);
+        return;
+      }
+      clearInterval(fetchPoll); fetchPoll = null;
+      if (f.ok) {
+        setFetch('Pulled ' + f.files + ' report(s) at ' + f.run_id +
+                 '. Now press Run.', false);
+      } else {
+        setFetch('The pull failed: ' + f.error + ' The previous files in ' +
+                 'input/uniware are untouched.', true);
+      }
+    }).fetchStatus();
   }
 
   function lastFetch() {
