@@ -158,7 +158,9 @@ def cycle(args) -> int:
         log(f"\n[2] input fingerprint {fp}  (last run {last.get('fingerprint', '—')})")
         log(f"    output/latest holds {len(published)} file(s)")
 
-        if fp == last.get("fingerprint") and not args.force:
+        if last.get("ok") is False:
+            log("    the last run failed — rebuilding rather than skipping")
+        elif fp == last.get("fingerprint") and not args.force:
             if published:
                 log("    unchanged since the last run — nothing to do")
                 DS.write_status(ws, ok=True, started=started, manifest=manifest,
@@ -206,6 +208,7 @@ def cycle(args) -> int:
         DS.push_reorder_sheet(ws, C.REORDER_OVERRIDES, log=log)
         ws.save_state(RUN_STATE, {
             "fingerprint": fp,
+            "ok": True,
             "run_id": run_id,
             "stamp": stamp,
             "files": len(manifest["files"]),
@@ -232,6 +235,16 @@ def cycle(args) -> int:
         tb = traceback.format_exc().strip().splitlines()[-6:]
         for ln in tb:
             log("    " + ln)
+        # Record the failure, so the next press retries instead of comparing
+        # fingerprints and skipping. A run that died between publishing some
+        # files and publishing the rest leaves output/latest non-empty, so the
+        # "are there reports?" guard would wave it through — pressing Run again
+        # has to be a retry, always.
+        try:
+            ws.save_state(RUN_STATE, {"fingerprint": None, "ok": False,
+                                      "run_id": run_id, "error": str(exc)[:400]})
+        except Exception:                                       # noqa: BLE001
+            log("    (could not record the failure in _state either)")
         try:
             DS.write_status(ws, ok=False, started=started, manifest=manifest,
                             lines=notes())

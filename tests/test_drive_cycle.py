@@ -6,6 +6,8 @@ would otherwise only be discovered in production:
   1  a first run builds, publishes and archives
   2  a second run with identical inputs is skipped, not rebuilt
  2b  ...unless the reports it points at have been deleted
+ 2c  ...or a threshold in alert_rules.yaml changed
+ 2d  ...or the last run failed, which must always retry
   3  --force rebuilds anyway
   4  a changed input triggers a rebuild
   5  publishing overwrites in place — output/latest/ file IDs survive, so a
@@ -23,6 +25,7 @@ would otherwise only be discovered in production:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -179,6 +182,23 @@ def main():
     rc = run_cycle(d.root_id)
     check("and settles back to skipping", "SKIPPED" in status_text(d))
 
+    print("\n[2d] a failed run always retries, never skips")
+    # After a failure, pressing Run again must rebuild. Relying on "the
+    # fingerprint was not saved" is not enough: a run that dies midway through
+    # publishing leaves output/latest non-empty and the inputs unchanged, so
+    # both other guards would wave the retry through to a skip.
+    state_id = d.find(d.root_id, "_state")["id"]
+    st = d.find(state_id, "last_run.json")
+    saved = st["content"]
+    st["content"] = json.dumps({"fingerprint": None, "ok": False,
+                                "run_id": "pretend", "error": "boom"}).encode()
+    rc = run_cycle(d.root_id)
+    check("run after a recorded failure succeeds", rc == 0, f"rc={rc}")
+    check("a failed last run forces a retry, not a skip",
+          "SKIPPED" not in status_text(d))
+    check("and the retry clears the failure flag",
+          json.loads(d.find(state_id, "last_run.json")["content"]).get("ok") is True)
+
     print("\n[3] --force")
     # Re-snapshot here: [2b] deliberately deleted the published files, and a
     # file recreated after deletion gets a new Drive id by definition. The
@@ -216,7 +236,6 @@ def main():
           not (C.INPUT / "retail stores" / gone["name"]).exists())
 
     print("\n[6] alert state carries across runs")
-    import json
     st = json.loads((C.REPORTS / "_state" / "alert_state.json").read_text())
     check("alert state persisted", len(st.get("alerts", {})) > 0,
           f"{len(st.get('alerts', {})):,} tracked")
