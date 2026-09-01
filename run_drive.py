@@ -32,6 +32,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -117,6 +118,30 @@ FETCH_STATE = "last_fetch.json"
 UNIWARE_SCRIPT = "uniware_exports.py"
 
 
+def _explain_uniware(stderr: str, attempts: int) -> str:
+    """Turn a stack trace into something the person reading it can act on."""
+    tail = (stderr or "").strip().splitlines()
+    last = tail[-1] if tail else "no output"
+
+    if "503" in last or "502" in last or "504" in last:
+        return (
+            f"Uniware returned a server error on all {attempts} attempts: "
+            f"{last[:160]}\n"
+            "This is Uniware's side, not the credentials — the same host "
+            "refuses unrelated requests too. Either it is down, or it is "
+            "refusing datacenter traffic: the same pull may well work from an "
+            "office machine while failing from a cloud runner. Nothing in "
+            "Drive was changed; the previous pull is still in input/uniware/.")
+    if "401" in last or "invalid_grant" in last or "Bad credentials" in last:
+        return (f"Uniware rejected the credentials: {last[:160]}\n"
+                "Check UNIWARE_USER and UNIWARE_PASS, and that the account is "
+                "not locked or password-expired.")
+    if "timed out" in last.lower() or "ConnectionError" in last:
+        return (f"Could not reach Uniware: {last[:160]}\n"
+                "Network or DNS, not credentials.")
+    return f"uniware_exports.py failed after {attempts} attempts: {last[:200]}"
+
+
 def fetch_cycle(args) -> int:
     started = datetime.now(timezone.utc)
     local = DS.to_local(started)
@@ -147,20 +172,39 @@ def fetch_cycle(args) -> int:
         if C.FACILITY:
             cmd += ["--facility", C.FACILITY]
 
-        try:
-            proc = subprocess.run(cmd, cwd=str(HERE), env=env, text=True,
-                                  capture_output=True, timeout=args.fetch_timeout)
-        except subprocess.TimeoutExpired:
-            raise RuntimeError(
-                f"Uniware did not finish within {args.fetch_timeout}s. Nothing "
-                f"was changed — the previous pull is still in input/uniware/.")
+        # Uniware is a third party having its own day. A 5xx at the token
+        # endpoint is transient often enough that failing the client's button
+        # on the first one is the wrong answer — but not so often that we
+        # should retry forever, so: three tries, widening gaps, then give up
+        # honestly. Each attempt starts a fresh export job, so retrying is safe.
+        attempts, proc, last = 3, None, ""
+        for attempt in range(1, attempts + 1):
+            try:
+                proc = subprocess.run(cmd, cwd=str(HERE), env=env, text=True,
+                                      capture_output=True,
+                                      timeout=args.fetch_timeout)
+            except subprocess.TimeoutExpired:
+                raise RuntimeError(
+                    f"Uniware did not finish within {args.fetch_timeout}s. "
+                    f"Nothing was changed — the previous pull is still in "
+                    f"input/uniware/.")
 
-        for ln in (proc.stdout or "").strip().splitlines()[-20:]:
-            log("    " + ln)
-        if proc.returncode != 0:
-            for ln in (proc.stderr or "").strip().splitlines()[-10:]:
+            for ln in (proc.stdout or "").strip().splitlines()[-20:]:
+                log("    " + ln)
+            if proc.returncode == 0:
+                break
+
+            last = (proc.stderr or "").strip()
+            for ln in last.splitlines()[-8:]:
                 log("    ! " + ln)
-            raise RuntimeError(f"uniware_exports.py exited {proc.returncode}")
+            if attempt < attempts:
+                wait = 30 * attempt
+                log(f"    attempt {attempt} of {attempts} failed — "
+                    f"retrying in {wait}s")
+                time.sleep(wait)
+
+        if proc is None or proc.returncode != 0:
+            raise RuntimeError(_explain_uniware(last, attempts))
 
         pulled = sorted(p for p in tmp.rglob("*.csv") if p.is_file())
         if not pulled:
