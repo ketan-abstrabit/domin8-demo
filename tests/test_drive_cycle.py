@@ -160,6 +160,25 @@ def main():
     check("reports are back", len(latest_names(d)) >= 6,
           f"{len(latest_names(d))} republished")
 
+    print("\n[2c] editing a threshold rebuilds without anyone forcing it")
+    # alert_rules.yaml lives in the repo, not in Drive, so a threshold change
+    # moves nothing the input fingerprint can see. Without the rules in the
+    # fingerprint the client would press Run, get a skip, and keep yesterday's
+    # alerts — the one case that would still have needed the force checkbox.
+    rules = ROOT / "alert_rules.yaml"
+    original = rules.read_text()
+    try:
+        rules.write_text(original.replace("cover_days: 21", "cover_days: 30"))
+        rc = run_cycle(d.root_id)
+        check("changed thresholds rebuild on their own", rc == 0
+              and "SKIPPED" not in status_text(d), "cover_days 21 -> 30")
+    finally:
+        rules.write_text(original)
+    rc = run_cycle(d.root_id)
+    check("reverting the thresholds rebuilds too", "SKIPPED" not in status_text(d))
+    rc = run_cycle(d.root_id)
+    check("and settles back to skipping", "SKIPPED" in status_text(d))
+
     print("\n[3] --force")
     # Re-snapshot here: [2b] deliberately deleted the published files, and a
     # file recreated after deletion gets a new Drive id by definition. The

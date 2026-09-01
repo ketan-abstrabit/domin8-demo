@@ -26,6 +26,7 @@ read a folder and write a folder, and stay identically testable offline.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import shutil
 import subprocess
@@ -70,6 +71,14 @@ def clear_local_inputs():
                 if f.is_file():
                     f.unlink()
     C.INPUT.mkdir(parents=True, exist_ok=True)
+
+
+def rules_fingerprint() -> str:
+    """Hash of alert_rules.yaml, so editing a threshold counts as a change."""
+    path = HERE / "alert_rules.yaml"
+    if not path.exists():
+        return "norules"
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:8]
 
 
 def run_pipeline(args) -> int:
@@ -135,7 +144,14 @@ def cycle(args) -> int:
         # nothing about that: delete output/latest, or lose a publish halfway,
         # and the pipeline would skip for ever, insisting reports are current
         # while the folder sits empty. So the outputs get a vote.
-        fp = DS.fingerprint(manifest)
+        #
+        # The thresholds count as an input too. They live in the repo rather
+        # than in Drive, so changing one and pushing would leave the client
+        # pressing Run and getting a skip — the same alerts as before, because
+        # nothing in Drive had moved. Folding the rules into the fingerprint
+        # means a threshold change rebuilds on its own, and removes the last
+        # honest reason for anyone to reach for the force checkbox.
+        fp = DS.fingerprint(manifest) + "+" + rules_fingerprint()
         last = ws.load_state(RUN_STATE, {}) or {}
         published = [f for f in fs.children(ws.latest, refresh=True)
                      if f["mimeType"] != DS.FOLDER_MIME]
