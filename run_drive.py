@@ -129,18 +129,32 @@ def cycle(args) -> int:
         ws.load_state_file(ALERT_STATE, STATE_DIR / ALERT_STATE)
 
         # -- 2  has anything changed? ------------------------------------
+        #
+        # "Inputs unchanged" is only a reason to skip if last time's reports
+        # are still there to stand in for this run. The fingerprint says
+        # nothing about that: delete output/latest, or lose a publish halfway,
+        # and the pipeline would skip for ever, insisting reports are current
+        # while the folder sits empty. So the outputs get a vote.
         fp = DS.fingerprint(manifest)
         last = ws.load_state(RUN_STATE, {}) or {}
+        published = [f for f in fs.children(ws.latest, refresh=True)
+                     if f["mimeType"] != DS.FOLDER_MIME]
         log(f"\n[2] input fingerprint {fp}  (last run {last.get('fingerprint', '—')})")
+        log(f"    output/latest holds {len(published)} file(s)")
+
         if fp == last.get("fingerprint") and not args.force:
-            log("    unchanged since the last run — nothing to do")
-            DS.write_status(ws, ok=True, started=started, manifest=manifest,
-                            lines=["Inputs are identical to the last run. "
-                                   "Reports in output/latest/ are current.",
-                                   "Add or replace a file in input/ to trigger "
-                                   "a rebuild, or run with --force."],
-                            skipped=True)
-            return 0
+            if published:
+                log("    unchanged since the last run — nothing to do")
+                DS.write_status(ws, ok=True, started=started, manifest=manifest,
+                                lines=["Inputs are identical to the last run. "
+                                       "Reports in output/latest/ are current.",
+                                       "Add or replace a file in input/ to trigger "
+                                       "a rebuild, or press Run with 'rebuild "
+                                       "even if nothing has changed'."],
+                                skipped=True)
+                return 0
+            log("    inputs unchanged, but output/latest is empty — "
+                "rebuilding rather than reporting reports that are not there")
 
         if args.dry_run:
             log("\n--dry-run: would rebuild here. Stopping.")

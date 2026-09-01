@@ -339,6 +339,14 @@ function selftest() {
     if (!l.hasNext()) throw new Error('no output/latest/ folder yet');
     var n = 0, it = l.next().getFiles();
     while (it.hasNext()) { it.next(); n++; }
+    // An empty output/latest is the failure this check exists to catch. It
+    // reported "0 published file(s)" as a pass once; the folder existing is
+    // not the point, the reports being in it is.
+    if (n === 0) {
+      throw new Error('output/latest/ is empty — no reports have been ' +
+                      'published. Press Run with "rebuild even if nothing ' +
+                      'has changed" ticked.');
+    }
     return n + ' published file(s)';
   });
 
@@ -353,8 +361,13 @@ function selftest() {
       if (line.indexOf('Last run') === 0) when = line.split(':').slice(1).join(':').trim();
       if (line.indexOf('Result') === 0) result = line.split(':').slice(1).join(':').trim();
     });
-    if (result && result.indexOf('OK') !== 0) {
-      throw new Error('the last run did not succeed — "' + result + '" at ' + when);
+    // SKIPPED is a healthy outcome, not a failure: it means the inputs were
+    // identical and last cycle's reports still stand. Only a real FAILED
+    // deserves to fail this check — the empty-output case is caught above,
+    // where it belongs.
+    if (result && result.indexOf('FAILED') === 0) {
+      throw new Error('the last run failed at ' + when +
+                      '. Open STATUS.txt in the Drive folder for the reason.');
     }
     return (result || 'present') + ', ' + when;
   });

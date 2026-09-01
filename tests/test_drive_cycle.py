@@ -5,6 +5,7 @@ would otherwise only be discovered in production:
 
   1  a first run builds, publishes and archives
   2  a second run with identical inputs is skipped, not rebuilt
+ 2b  ...unless the reports it points at have been deleted
   3  --force rebuilds anyway
   4  a changed input triggers a rebuild
   5  publishing overwrites in place — output/latest/ file IDs survive, so a
@@ -134,14 +135,37 @@ def main():
     # the run after that.
     rc = run_cycle(d.root_id)
     check("run after seeding succeeds", rc == 0, f"rc={rc}")
-    before = latest_names(d)
     rc = run_cycle(d.root_id)
     check("steady-state run succeeds", rc == 0, f"rc={rc}")
     check("skipped as unchanged", "SKIPPED" in status_text(d))
     check("skip is cheap — no build ran",
           "Reports in output/latest/ are current" in status_text(d))
 
+    print("\n[2b] a skip must not outlive the reports it points at")
+    # What happened live: the output folders were deleted during cleanup, then
+    # a run found the inputs unchanged and skipped — leaving STATUS.txt saying
+    # "reports are current" over an empty folder, for ever. The fingerprint
+    # alone is not enough; the outputs have to still exist.
+    outf = d.find(d.root_id, "output")
+    latest = d.find(outf["id"], "latest")
+    wiped = 0
+    for n in list(d.nodes.values()):
+        if not n["trashed"] and latest["id"] in n["parents"]:
+            n["trashed"] = True
+            wiped += 1
+    rc = run_cycle(d.root_id)
+    check("run after output was deleted succeeds", rc == 0, f"rc={rc}")
+    check("empty output/latest forces a rebuild despite unchanged inputs",
+          "SKIPPED" not in status_text(d), f"{wiped} files had been deleted")
+    check("reports are back", len(latest_names(d)) >= 6,
+          f"{len(latest_names(d))} republished")
+
     print("\n[3] --force")
+    # Re-snapshot here: [2b] deliberately deleted the published files, and a
+    # file recreated after deletion gets a new Drive id by definition. The
+    # property under test is that a *republish over an existing file* keeps its
+    # id, so the baseline has to be the current set.
+    before = latest_names(d)
     rc = run_cycle(d.root_id, force=True)
     after = latest_names(d)
     check("forced run rebuilds", rc == 0 and "SKIPPED" not in status_text(d))
