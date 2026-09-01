@@ -1,19 +1,23 @@
 name: DOMIN8 report
 
-# The client's whole interface is a Drive folder. This is what watches it.
+# Three ways in:
 #
-# Most firings do nothing: run_drive.py fingerprints the input folder and
-# stops in ~30 seconds if nothing has changed. Only a real upload triggers a
-# build. On the free tier that is roughly two hours of the 2,000-minute monthly
-# allowance for a private repo, and nothing at all for a public one.
+#   repository_dispatch  the client presses "Run now" in the Drive web app.
+#                        This is the primary path — the report is built when
+#                        someone actually wants it, not on a timer.
+#   schedule             a forced run on the 1st and 16th, matching their
+#                        twice-monthly cycle. A backstop, so a cycle still goes
+#                        out if nobody remembers to press the button.
+#   workflow_dispatch    you, from the Actions tab, when debugging.
+#
+# There is deliberately no frequent poll. Polling existed only to notice
+# uploads; the button notices them the moment the client does.
 
 on:
+  repository_dispatch:
+    types: [run-report]
   schedule:
-    # Every two hours through the Indian working day (09:00-21:00 IST).
-    # GitHub cron is UTC; IST is UTC+5:30, hence the :30.
-    - cron: "30 3-15/2 * * *"
-    # Belt and braces on the 1st and 16th — their twice-monthly cycle. Forced,
-    # so the cycle report goes out even if nobody re-uploaded anything.
+    # 08:00 IST on the 1st and 16th. GitHub cron is UTC; IST is UTC+5:30.
     - cron: "30 2 1,16 * *"
   workflow_dispatch:
     inputs:
@@ -28,7 +32,8 @@ on:
 
 concurrency:
   # Two runs writing to output/latest/ at once would interleave. Let the one in
-  # flight finish rather than cancelling it half-published.
+  # flight finish rather than cancelling it half-published — an impatient
+  # double-click must not corrupt a publish.
   group: domin8-report
   cancel-in-progress: false
 
@@ -58,15 +63,23 @@ jobs:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          # client_payload is the one input here that comes from outside
+          # GitHub. Interpolating it straight into the shell would be a script
+          # injection; passed as env and quoted below, it is inert.
+          PAYLOAD_FORCE: ${{ github.event.client_payload.force }}
+          PAYLOAD_BY: ${{ github.event.client_payload.requested_by }}
+          EVENT: ${{ github.event_name }}
+          INPUT_FORCE: ${{ inputs.force }}
+          INPUT_NO_EMAIL: ${{ inputs.no_email }}
         run: |
+          set -euo pipefail
           FLAGS=""
-          # The 1st/16th cycle run always rebuilds; the hourly poll does not.
-          if [ "${{ github.event.schedule }}" = "30 2 1,16 * *" ]; then
-            FLAGS="$FLAGS --force"
-          fi
-          if [ "${{ inputs.force }}" = "true" ]; then FLAGS="$FLAGS --force"; fi
-          if [ "${{ inputs.no_email }}" = "true" ]; then FLAGS="$FLAGS --no-email"; fi
-          python run_drive.py $FLAGS
+          # The scheduled cycle run always rebuilds.
+          if [ "$EVENT" = "schedule" ]; then FLAGS="$FLAGS --force"; fi
+          if [ "${PAYLOAD_FORCE:-}" = "true" ]; then FLAGS="$FLAGS --force"; fi
+          if [ "${INPUT_FORCE:-}" = "true" ]; then FLAGS="$FLAGS --force"; fi
+          if [ "${INPUT_NO_EMAIL:-}" = "true" ]; then FLAGS="$FLAGS --no-email"; fi
+          python run_drive.py $FLAGS --requested-by "${PAYLOAD_BY:-}"
 
       - name: Keep the run log
         if: always()

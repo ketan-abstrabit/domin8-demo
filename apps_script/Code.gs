@@ -1,0 +1,350 @@
+/**
+ * DOMIN8 reporting — the client's Run now button.
+ *
+ * A standalone Apps Script deployed as a web app. The client opens one URL,
+ * presses one button, and the GitHub Actions workflow starts within seconds.
+ * They never see GitHub, never see the code, and never handle a credential.
+ *
+ * WHY THE SCRIPT OWNS THE TOKEN
+ * -----------------------------
+ * Triggering a workflow needs a GitHub token. If this script were bound to a
+ * Sheet the client can edit, they could open Extensions > Apps Script and read
+ * it. So this is a STANDALONE script, owned by Abstrabit, deployed to
+ * "Execute as: me". Every function below runs on the server under the owner's
+ * identity; google.script.run never ships the token to the browser. The client
+ * gets the button, not the key.
+ *
+ * SETUP  (see README.md in this folder for the full walk-through)
+ *   Project Settings > Script Properties:
+ *     GITHUB_REPO     ketan-abstrabit/domin8-demo
+ *     GITHUB_TOKEN    fine-grained PAT — Contents: read+write, Actions: read
+ *     DRIVE_ROOT_ID   the shared-drive folder id
+ *   Then run selftest() once from the editor and read the log.
+ */
+
+var EVENT_TYPE = 'run-report';
+var COOLDOWN_SECONDS = 120;
+var API = 'https://api.github.com';
+
+
+// ---------------------------------------------------------------------------
+// configuration
+// ---------------------------------------------------------------------------
+
+function prop_(key, required) {
+  var v = PropertiesService.getScriptProperties().getProperty(key);
+  v = v ? v.trim() : '';
+  if (!v && required) {
+    throw new Error('Script property ' + key + ' is not set. ' +
+                    'Project Settings > Script Properties.');
+  }
+  return v;
+}
+
+function ghHeaders_() {
+  return {
+    Authorization: 'Bearer ' + prop_('GITHUB_TOKEN', true),
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28'
+  };
+}
+
+/** Every GitHub call goes through here so failures explain themselves. */
+function gh_(method, path, payload) {
+  var opts = {
+    method: method,
+    headers: ghHeaders_(),
+    muteHttpExceptions: true,
+    contentType: 'application/json'
+  };
+  if (payload) opts.payload = JSON.stringify(payload);
+
+  var res = UrlFetchApp.fetch(API + path, opts);
+  var code = res.getResponseCode();
+  var body = res.getContentText();
+
+  if (code >= 200 && code < 300) {
+    return body ? JSON.parse(body) : {};
+  }
+
+  // The setup mistakes here are all token-shaped, and GitHub's own message is
+  // more accurate than anything guessed from documentation. Surface it.
+  var detail = '';
+  try { detail = JSON.parse(body).message || ''; } catch (e) { detail = body; }
+
+  if (code === 401) {
+    throw new Error('GitHub rejected the token (401). It is wrong, expired, ' +
+                    'or was revoked. Regenerate it and update GITHUB_TOKEN.');
+  }
+  if (code === 403 || code === 404) {
+    throw new Error(
+      'GitHub returned ' + code + ': ' + detail + '\n\n' +
+      'For a fine-grained token this almost always means a missing ' +
+      'permission or the repo not being selected on the token. Triggering ' +
+      'needs Contents: read and write; reading run status needs Actions: ' +
+      'read. Check both, and that the token lists this exact repository.');
+  }
+  throw new Error('GitHub ' + code + ': ' + detail);
+}
+
+
+// ---------------------------------------------------------------------------
+// the button
+// ---------------------------------------------------------------------------
+
+/**
+ * Start a run. Called from the page via google.script.run.
+ *
+ * Returns a plain object rather than throwing, so the page can show a sentence
+ * instead of a stack trace.
+ */
+function triggerRun(force) {
+  var cache = CacheService.getScriptCache();
+  if (cache.get('cooldown')) {
+    return {
+      ok: false,
+      message: 'A run was started less than two minutes ago. Give it a ' +
+               'moment — pressing again would only queue a duplicate.'
+    };
+  }
+
+  var who = '';
+  try { who = Session.getActiveUser().getEmail() || ''; } catch (e) { who = ''; }
+
+  try {
+    gh_('post', '/repos/' + prop_('GITHUB_REPO', true) + '/dispatches', {
+      event_type: EVENT_TYPE,
+      client_payload: { force: force === true, requested_by: who }
+    });
+  } catch (err) {
+    return { ok: false, message: String(err.message || err) };
+  }
+
+  cache.put('cooldown', '1', COOLDOWN_SECONDS);
+  console.log('run requested by ' + (who || 'unknown') + ' force=' + (force === true));
+  return {
+    ok: true,
+    message: force ? 'Rebuilding from scratch.' : 'Started.'
+  };
+}
+
+
+// ---------------------------------------------------------------------------
+// status
+// ---------------------------------------------------------------------------
+
+/**
+ * What is happening right now, and how the last run ended.
+ *
+ * GitHub knows whether a run is queued or building; STATUS.txt in Drive is the
+ * only thing that knows what the run actually concluded. The page needs both,
+ * so one call returns both.
+ */
+function runStatus() {
+  var out = { phase: 'unknown', label: 'Unknown', detail: '', status_text: '' };
+
+  try {
+    var runs = gh_('get', '/repos/' + prop_('GITHUB_REPO', true) +
+                          '/actions/runs?per_page=5');
+    var list = (runs && runs.workflow_runs) || [];
+    if (list.length) {
+      var r = list[0];
+      if (r.status === 'queued' || r.status === 'in_progress' ||
+          r.status === 'waiting' || r.status === 'requested') {
+        out.phase = 'running';
+        out.label = (r.status === 'queued') ? 'Queued' : 'Building the report';
+        out.detail = 'Started ' + ago_(r.run_started_at || r.created_at) +
+                     '. This usually takes three to four minutes.';
+      } else if (r.conclusion === 'success') {
+        out.phase = 'ok';
+        out.label = 'Last run finished';
+        out.detail = 'Completed ' + ago_(r.updated_at) + '.';
+      } else {
+        out.phase = 'failed';
+        out.label = 'Last run failed';
+        out.detail = 'It ended ' + ago_(r.updated_at) + ' (' +
+                     (r.conclusion || r.status) + '). Abstrabit has been ' +
+                     'emailed. The previous reports are still in output/latest.';
+      }
+    }
+  } catch (err) {
+    out.phase = 'error';
+    out.label = 'Cannot reach GitHub';
+    out.detail = String(err.message || err);
+  }
+
+  out.status_text = statusFile_();
+  return out;
+}
+
+/** STATUS.txt from the Drive folder — the run's own account of itself. */
+function statusFile_() {
+  try {
+    var it = DriveApp.getFolderById(prop_('DRIVE_ROOT_ID', true))
+                     .getFilesByName('STATUS.txt');
+    if (!it.hasNext()) return '';
+    return it.next().getBlob().getDataAsString();
+  } catch (err) {
+    return '';
+  }
+}
+
+function ago_(iso) {
+  if (!iso) return 'a moment ago';
+  var secs = Math.max(0, (new Date().getTime() - new Date(iso).getTime()) / 1000);
+  if (secs < 90) return Math.round(secs) + ' seconds ago';
+  if (secs < 5400) return Math.round(secs / 60) + ' minutes ago';
+  if (secs < 172800) return Math.round(secs / 3600) + ' hours ago';
+  return Math.round(secs / 86400) + ' days ago';
+}
+
+/** Deep link to the reports, so the page can hand them somewhere to go. */
+function folderLinks() {
+  var out = { root: '', latest: '' };
+  try {
+    var root = DriveApp.getFolderById(prop_('DRIVE_ROOT_ID', true));
+    out.root = root.getUrl();
+    var outs = root.getFoldersByName('output');
+    if (outs.hasNext()) {
+      var latest = outs.next().getFoldersByName('latest');
+      if (latest.hasNext()) out.latest = latest.next().getUrl();
+    }
+  } catch (err) { /* the page copes with empty links */ }
+  return out;
+}
+
+
+// ---------------------------------------------------------------------------
+// serving
+// ---------------------------------------------------------------------------
+
+function doGet(e) {
+  var page = (e && e.parameter && e.parameter.page) || 'run';
+  if (page === 'dashboard') return serveDashboard_();
+  return HtmlService.createTemplateFromFile('Index')
+    .evaluate()
+    .setTitle('DOMIN8 reporting')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+/**
+ * Serve the dashboard the pipeline already builds.
+ *
+ * Drive will not render an HTML file — it offers a download. Reading it here
+ * and returning it as the response gives the client a normal web page at a URL
+ * that never changes, behind their Google sign-in, always showing the newest
+ * run. No hosting, no public bucket, no third party.
+ */
+function serveDashboard_() {
+  var html;
+  try {
+    var root = DriveApp.getFolderById(prop_('DRIVE_ROOT_ID', true));
+    var latest = root.getFoldersByName('output').next()
+                     .getFoldersByName('latest').next();
+    var files = latest.getFilesByName('dashboard.html');
+    if (!files.hasNext()) throw new Error('dashboard.html is not in output/latest yet');
+    html = files.next().getBlob().getDataAsString();
+  } catch (err) {
+    html = '<div style="font:15px/1.6 system-ui;padding:40px;max-width:640px">' +
+           '<h2>The dashboard is not available yet</h2><p>' +
+           escapeHtml_(String(err.message || err)) +
+           '</p><p>Run a report first, then reload this page.</p></div>';
+  }
+  return HtmlService.createHtmlOutput(html)
+    .setTitle('DOMIN8 dashboard')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+function escapeHtml_(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                  .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function webAppUrl() {
+  return ScriptApp.getService().getUrl();
+}
+
+
+// ---------------------------------------------------------------------------
+// selftest
+//
+// Apps Script cannot be tested from outside Google, so this is the substitute:
+// run it once from the editor after deploying and it checks every assumption
+// the web app makes, reporting exactly which one is wrong. It never triggers a
+// run, so it is safe to re-run whenever something looks off.
+// ---------------------------------------------------------------------------
+
+function selftest() {
+  var lines = ['DOMIN8 web app selftest', '========================'];
+  var ok = true;
+
+  function check(name, fn) {
+    try {
+      var detail = fn();
+      lines.push('  PASS  ' + name + (detail ? '  — ' + detail : ''));
+    } catch (err) {
+      ok = false;
+      lines.push('  FAIL  ' + name + '\n          ' + String(err.message || err));
+    }
+  }
+
+  check('GITHUB_REPO is set', function () {
+    var r = prop_('GITHUB_REPO', true);
+    if (r.split('/').length !== 2) throw new Error('expected owner/repo, got "' + r + '"');
+    return r;
+  });
+
+  check('GITHUB_TOKEN is set', function () {
+    var t = prop_('GITHUB_TOKEN', true);
+    return t.length + ' characters, starts "' + t.substring(0, 7) + '..."';
+  });
+
+  check('token can read the repo', function () {
+    var r = gh_('get', '/repos/' + prop_('GITHUB_REPO', true));
+    return r.full_name + (r.private ? ' (private)' : ' (public)');
+  });
+
+  check('token can read workflow runs  [Actions: read]', function () {
+    var r = gh_('get', '/repos/' + prop_('GITHUB_REPO', true) +
+                       '/actions/runs?per_page=1');
+    return (r.total_count || 0) + ' run(s) in history';
+  });
+
+  check('workflow accepts repository_dispatch', function () {
+    var wfs = gh_('get', '/repos/' + prop_('GITHUB_REPO', true) + '/actions/workflows');
+    var names = (wfs.workflows || []).map(function (w) { return w.name; });
+    if (!names.length) throw new Error('no workflows found — is the file pushed?');
+    return names.join(', ');
+  });
+
+  check('DRIVE_ROOT_ID resolves', function () {
+    return DriveApp.getFolderById(prop_('DRIVE_ROOT_ID', true)).getName();
+  });
+
+  check('output/latest exists', function () {
+    var root = DriveApp.getFolderById(prop_('DRIVE_ROOT_ID', true));
+    var o = root.getFoldersByName('output');
+    if (!o.hasNext()) throw new Error('no output/ folder — has a run succeeded yet?');
+    var l = o.next().getFoldersByName('latest');
+    if (!l.hasNext()) throw new Error('no output/latest/ folder yet');
+    var n = 0, it = l.next().getFiles();
+    while (it.hasNext()) { it.next(); n++; }
+    return n + ' published file(s)';
+  });
+
+  check('STATUS.txt is readable', function () {
+    var t = statusFile_();
+    if (!t) throw new Error('not found — normal before the first successful run');
+    return t.split('\n')[2] || 'present';
+  });
+
+  lines.push('');
+  lines.push(ok ? 'All checks pass. The button is ready to hand over.'
+                : 'Fix the FAILs above, then run selftest() again.');
+  lines.push('');
+  lines.push('Note: this deliberately does not start a run. Use the button for that.');
+
+  var report = lines.join('\n');
+  console.log(report);
+  return report;
+}

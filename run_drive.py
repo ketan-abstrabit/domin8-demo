@@ -96,7 +96,9 @@ def cycle(args) -> int:
     stamp = started.astimezone().strftime("%Y-%m-%d_%H%M")
     run_id = started.astimezone().strftime("%d %b %Y, %H:%M")
 
-    log(f"DOMIN8 · Drive run · {run_id}")
+    who = (getattr(args, "requested_by", "") or "").strip()
+    log(f"DOMIN8 · Drive run · {run_id}"
+        + (f" · requested by {who}" if who else " · scheduled"))
 
     # -- 0  connect ------------------------------------------------------
     log("\n[0] connecting to Drive")
@@ -187,6 +189,7 @@ def cycle(args) -> int:
             ("Digest emailed." if summary["emailed"]
              else "No email sent this run (nothing changed, or SMTP not configured)."),
             f"Archived as output/archive/{stamp}/.",
+            (f"Requested by {who}." if who else "Started by the schedule."),
         ])
         log(f"\nDone. {len(links)} file(s) published to output/latest/.")
         return 0
@@ -246,6 +249,9 @@ def main():
                     help="pull Uniware over the API before building")
     ap.add_argument("--days", type=int, default=C.DEFAULT_DAYS)
     ap.add_argument("--asof", help="Stock vs Sales report date, YYYY-MM-DD")
+    ap.add_argument("--requested-by", default="",
+                    help="who pressed Run now, recorded in STATUS.txt so the "
+                         "client can see who asked for a cycle and when")
     a = ap.parse_args()
 
     if not a.root_id:

@@ -124,31 +124,45 @@ Then check the drive: `output/latest/` should hold ten files, `STATUS.txt`
 should say `Result : OK`, and `input/` should have gained a `reorder_status`
 Google Sheet.
 
-## 7. Hand over
+## 7. Give the client the button
+
+The report runs when someone asks for it. That someone is the client, pressing
+a button on a Google web app — see **[apps_script/README.md](apps_script/README.md)**
+for the 15-minute setup.
+
+They get one URL. Behind it: Run now, the last run's status, and a link to the
+dashboard. They never see GitHub and never hold a credential; the token lives
+in a script you own that runs as you.
+
+## 8. Hand over
 
 Give the client edit access to the shared drive and tell them three things:
 
 - Put files in `input/` — the subfolder names are `uniware`, `amazon vc`,
   `retail stores`. The master mapping table goes loose in `input/`.
-- Reports appear in `output/latest/` within about two hours. Previous cycles
-  are in `output/archive/`.
-- If something looks wrong, open `STATUS.txt` — it says when the last run
-  happened, what it read, and whether it worked.
+- Press **Run the report** on the web app. Three to four minutes later the
+  reports are in `output/latest/`. Previous cycles are in `output/archive/`.
+- If something looks wrong, the page shows it, and `STATUS.txt` in the folder
+  says when the last run happened, what it read, and whether it worked.
 
 ---
 
-## How often it runs
+## When it runs
 
-Every two hours through the Indian working day, plus a forced run on the 1st
-and 16th to match their twice-monthly cycle.
+**When the client presses the button.** That is the primary path — the report
+is built when someone actually wants it.
 
-Most firings cost about 30 seconds: `run_drive.py` fingerprints the input
-folder against the last run and stops if nothing changed. Only a real upload
-triggers a build. On a private repo that is roughly 2 hours of the free
-2,000-minute monthly allowance; on a public repo, nothing.
+There is also a forced run on the 1st and 16th at 08:00 IST, matching their
+twice-monthly cycle, so a cycle still goes out if nobody remembers to press
+anything. Edit the `cron:` line in `.github/workflows/domin8-report.yml` to
+change it; GitHub cron is UTC and IST is UTC+5:30.
 
-To change the cadence, edit the two `cron:` lines in
-`.github/workflows/domin8-report.yml`. They are UTC — IST is UTC+5:30.
+There is deliberately **no frequent poll**. Polling only ever existed to notice
+uploads, and the button notices them the moment the client does. Dropping it
+takes Actions usage to near zero — a handful of runs a month instead of ~200.
+
+You can still run it yourself from **Actions → DOMIN8 report → Run workflow**
+when debugging.
 
 ## Changing the thresholds
 

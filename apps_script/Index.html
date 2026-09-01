@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html>
+<head>
+<base target="_top">
+<!--
+  The client-facing page. One button, one honest status line.
+
+  Everything here runs in the viewer's browser. It calls the server functions
+  in Code.gs through google.script.run, which means the GitHub token stays on
+  the server and never reaches this page — the client can press the button and
+  still cannot see the key.
+-->
+<style>
+  :root{
+    --ink:#111827; --muted:#6b7280; --line:#e5e7eb; --bg:#f3f4f6;
+    --card:#ffffff; --accent:#111827;
+    --ok:#047857; --okbg:#ecfdf5; --okline:#a7f3d0;
+    --busy:#b45309; --busybg:#fffbeb; --busyline:#fde68a;
+    --bad:#b42318; --badbg:#fef3f2; --badline:#fecdca;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+       padding:32px 16px}
+  .wrap{max-width:620px;margin:0 auto}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+        overflow:hidden}
+  .head{padding:22px 26px;border-bottom:1px solid var(--line)}
+  h1{margin:0;font-size:19px;font-weight:600;letter-spacing:-.01em}
+  .sub{color:var(--muted);font-size:13.5px;margin-top:4px}
+  .body{padding:26px}
+
+  button.run{appearance:none;border:0;border-radius:9px;background:var(--accent);
+    color:#fff;font-size:15.5px;font-weight:600;padding:14px 26px;cursor:pointer;
+    width:100%;transition:opacity .15s}
+  button.run:hover:not(:disabled){opacity:.88}
+  button.run:disabled{opacity:.45;cursor:not-allowed}
+
+  .opt{margin-top:14px;color:var(--muted);font-size:13px;display:flex;
+       align-items:center;gap:8px}
+  .opt input{margin:0}
+
+  .state{margin-top:22px;padding:14px 16px;border-radius:9px;font-size:14px;
+         border:1px solid var(--line);background:#f9fafb;color:var(--muted)}
+  .state.ok{background:var(--okbg);border-color:var(--okline);color:var(--ok)}
+  .state.running{background:var(--busybg);border-color:var(--busyline);color:var(--busy)}
+  .state.failed,.state.error{background:var(--badbg);border-color:var(--badline);color:var(--bad)}
+  .state b{display:block;font-size:14.5px;margin-bottom:2px}
+  .state .d{opacity:.85;font-size:13.5px}
+
+  .spin{display:inline-block;width:12px;height:12px;margin-right:7px;
+        border:2px solid currentColor;border-right-color:transparent;
+        border-radius:50%;animation:sp .7s linear infinite;vertical-align:-1px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+
+  details{margin-top:18px}
+  summary{cursor:pointer;color:var(--muted);font-size:13.5px}
+  pre{white-space:pre-wrap;word-break:break-word;background:#f9fafb;
+      border:1px solid var(--line);border-radius:8px;padding:12px;
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      margin:10px 0 0;max-height:320px;overflow:auto;color:var(--ink)}
+
+  .links{margin-top:22px;padding-top:18px;border-top:1px solid var(--line);
+         display:flex;gap:18px;flex-wrap:wrap;font-size:14px}
+  .links a{color:#175cd3;text-decoration:none}
+  .links a:hover{text-decoration:underline}
+
+  .note{color:var(--muted);font-size:12.5px;margin-top:22px;text-align:center}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <div class="head">
+      <h1>DOMIN8 reporting</h1>
+      <div class="sub">Upload this cycle's files to <b>input</b> in Drive, then press Run.</div>
+    </div>
+    <div class="body">
+
+      <button class="run" id="go" onclick="go()">Run the report</button>
+
+      <label class="opt">
+        <input type="checkbox" id="force">
+        Rebuild even if nothing has changed since the last run
+      </label>
+
+      <div class="state" id="state" role="status" aria-live="polite">
+        <b>Checking&hellip;</b>
+      </div>
+
+      <details id="det">
+        <summary>Details of the last run</summary>
+        <pre id="statusText">Nothing recorded yet.</pre>
+      </details>
+
+      <div class="links" id="links"></div>
+    </div>
+  </div>
+  <div class="note">Reports take three to four minutes. You can close this page &mdash; it keeps running.</div>
+</div>
+
+<script>
+  var polling = null;
+
+  function go() {
+    var btn = document.getElementById('go');
+    btn.disabled = true;
+    btn.textContent = 'Starting…';
+    show('running', 'Starting', 'Asking the report to build.');
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res.ok) {
+          show('failed', 'Could not start', res.message);
+          reset();
+          return;
+        }
+        show('running', 'Building the report', res.message +
+             ' This usually takes three to four minutes.');
+        startPolling();
+        setTimeout(reset, 8000);
+      })
+      .withFailureHandler(function (err) {
+        show('error', 'Something went wrong', String(err && err.message || err));
+        reset();
+      })
+      .triggerRun(document.getElementById('force').checked);
+  }
+
+  function reset() {
+    var btn = document.getElementById('go');
+    btn.disabled = false;
+    btn.textContent = 'Run the report';
+  }
+
+  function show(kind, title, detail) {
+    var el = document.getElementById('state');
+    el.className = 'state ' + kind;
+    var spin = (kind === 'running') ? '<span class="spin"></span>' : '';
+    el.innerHTML = '<b>' + spin + esc(title) + '</b>' +
+                   (detail ? '<div class="d">' + esc(detail) + '</div>' : '');
+  }
+
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function refresh() {
+    google.script.run
+      .withSuccessHandler(function (s) {
+        show(s.phase === 'ok' ? 'ok' : s.phase === 'running' ? 'running'
+             : s.phase === 'failed' ? 'failed' : 'error',
+             s.label, s.detail);
+
+        if (s.status_text) {
+          document.getElementById('statusText').textContent = s.status_text;
+        }
+        // Stop polling once it is no longer building, so an open tab left on a
+        // desk does not call GitHub every six seconds all afternoon.
+        if (s.phase !== 'running' && polling) {
+          clearInterval(polling);
+          polling = null;
+        }
+      })
+      .withFailureHandler(function (err) {
+        show('error', 'Cannot check the status', String(err && err.message || err));
+      })
+      .runStatus();
+  }
+
+  function startPolling() {
+    if (polling) clearInterval(polling);
+    polling = setInterval(refresh, 6000);
+    setTimeout(refresh, 3000);
+  }
+
+  function links() {
+    google.script.run.withSuccessHandler(function (l) {
+      var out = [];
+      if (l.latest) out.push('<a href="' + l.latest + '">Open this cycle\'s reports</a>');
+      if (l.root) out.push('<a href="' + l.root + '">Upload files</a>');
+      out.push('<a href="?page=dashboard">Dashboard</a>');
+      document.getElementById('links').innerHTML = out.join('');
+    }).folderLinks();
+  }
+
+  refresh();
+  links();
+  // If a run happens to be in flight when the page opens, follow it.
+  setTimeout(function () {
+    var el = document.getElementById('state');
+    if (el.className.indexOf('running') > -1 && !polling) startPolling();
+  }, 2500);
+</script>
+</body>
+</html>
