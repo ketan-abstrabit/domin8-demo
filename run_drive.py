@@ -93,8 +93,11 @@ def run_pipeline(args) -> int:
 
 def cycle(args) -> int:
     started = datetime.now(timezone.utc)
-    stamp = started.astimezone().strftime("%Y-%m-%d_%H%M")
-    run_id = started.astimezone().strftime("%d %b %Y, %H:%M")
+    # Stamped in the timezone the reports are read in, not the runner's UTC —
+    # otherwise archive folders sort under the wrong date for evening runs.
+    local = DS.to_local(started)
+    stamp = local.strftime("%Y-%m-%d_%H%M")
+    run_id = local.strftime("%d %b %Y, %H:%M")
 
     who = (getattr(args, "requested_by", "") or "").strip()
     log(f"DOMIN8 · Drive run · {run_id}"

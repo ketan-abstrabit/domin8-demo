@@ -79,6 +79,33 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def to_local(dt: datetime) -> datetime:
+    """Render a moment in the timezone the reports are read in.
+
+    `astimezone()` with no argument uses the machine's clock, which on a CI
+    runner is UTC — so every timestamp a human sees would be shifted, and after
+    18:30 IST also dated to the previous day. Falls back to a fixed +05:30 if
+    the zone database is missing from a slim image.
+    """
+    name = getattr(_cfg(), "REPORT_TZ", None)
+    if not name:
+        return dt.astimezone()
+    try:
+        from zoneinfo import ZoneInfo
+        return dt.astimezone(ZoneInfo(name))
+    except Exception:                                       # noqa: BLE001
+        from datetime import timedelta
+        return dt.astimezone(timezone(timedelta(hours=5, minutes=30), "IST"))
+
+
+def _cfg():
+    try:
+        import pipeline_config
+        return pipeline_config
+    except Exception:                                       # noqa: BLE001
+        return None
+
+
 # ---------------------------------------------------------------------------
 # auth
 # ---------------------------------------------------------------------------
@@ -591,7 +618,7 @@ def write_status(ws: Workspace, *, ok: bool, started: datetime, manifest: dict,
     body = [
         "DOMIN8 omnichannel reporting",
         "=" * 60,
-        f"Last run   : {started.astimezone().strftime('%d %b %Y, %H:%M %Z')}",
+        f"Last run   : {to_local(started).strftime('%d %b %Y, %H:%M %Z')}",
         f"Result     : {verdict}",
         f"Duration   : {dur:,.0f}s",
         "",

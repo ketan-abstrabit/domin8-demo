@@ -72,6 +72,19 @@ FETCH_BY_DEFAULT = False
 
 FACILITY = "DOMIN8"
 
+# ---------------------------------------------------------------------------
+# Timezone for anything a human reads
+#
+# The pipeline runs on a GitHub runner, whose clock is UTC. Left alone, every
+# timestamp in STATUS.txt and every archive folder name comes out in UTC — so a
+# run at 01:06 on Tuesday morning IST is filed as 19:36 the previous day, and
+# the team reading it is off by five and a half hours and sometimes a date.
+#
+# Reports are read in India, so they are stamped in India.
+# ---------------------------------------------------------------------------
+
+REPORT_TZ = "Asia/Kolkata"
+
 # Reports to pull. These are the `name` values in uniware_exports.py's REPORTS
 # dict -- not the dropdown labels.
 UNIWARE_REPORTS = [

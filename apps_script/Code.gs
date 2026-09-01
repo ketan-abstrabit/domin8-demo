@@ -324,8 +324,18 @@ function selftest() {
   check('output/latest exists', function () {
     var root = DriveApp.getFolderById(prop_('DRIVE_ROOT_ID', true));
     var o = root.getFoldersByName('output');
-    if (!o.hasNext()) throw new Error('no output/ folder — has a run succeeded yet?');
-    var l = o.next().getFoldersByName('latest');
+    if (!o.hasNext()) {
+      throw new Error('no output/ folder yet. Expected before the first ' +
+                      'successful run, or if it was deleted during cleanup. ' +
+                      'Press the button once and this clears.');
+    }
+    var dupes = 0, first = null;
+    while (o.hasNext()) { var f = o.next(); dupes++; if (!first) first = f; }
+    if (dupes > 1) {
+      throw new Error(dupes + ' folders named "output" exist. Keep the one ' +
+                      'containing latest/ and archive/, delete the others.');
+    }
+    var l = first.getFoldersByName('latest');
     if (!l.hasNext()) throw new Error('no output/latest/ folder yet');
     var n = 0, it = l.next().getFiles();
     while (it.hasNext()) { it.next(); n++; }
@@ -334,8 +344,19 @@ function selftest() {
 
   check('STATUS.txt is readable', function () {
     var t = statusFile_();
-    if (!t) throw new Error('not found — normal before the first successful run');
-    return t.split('\n')[2] || 'present';
+    if (!t) throw new Error('not found — normal before the first run');
+    // Report the RESULT, not just the timestamp. A stale STATUS.txt from a
+    // failed run reads identically to a fresh one otherwise, which is exactly
+    // the confusion this check exists to prevent.
+    var when = '', result = '';
+    t.split('\n').forEach(function (line) {
+      if (line.indexOf('Last run') === 0) when = line.split(':').slice(1).join(':').trim();
+      if (line.indexOf('Result') === 0) result = line.split(':').slice(1).join(':').trim();
+    });
+    if (result && result.indexOf('OK') !== 0) {
+      throw new Error('the last run did not succeed — "' + result + '" at ' + when);
+    }
+    return (result || 'present') + ', ' + when;
   });
 
   lines.push('');
