@@ -540,23 +540,65 @@ def fingerprint(manifest: dict) -> str:
 ARCHIVE_KEEP = 12
 
 
-def push_outputs(ws: Workspace, local_output: Path, stamp: str, log=print) -> dict:
-    """Publish output/ to Drive: latest/ overwritten, archive/<stamp>/ added."""
+def is_main_output(name: str, patterns: list[str]) -> bool:
+    from fnmatch import fnmatch
+    return any(fnmatch(name, p) for p in patterns)
+
+
+def push_outputs(ws: Workspace, local_output: Path, stamp: str,
+                 main_patterns: list[str] | None = None,
+                 extras_dir: str = "extras", log=print) -> dict:
+    """Publish output/ to Drive: latest/ overwritten, archive/<stamp>/ added.
+
+    The two headline workbooks sit at the top of latest/; the supporting files
+    go one level down. A folder holding ten files makes the client hunt for the
+    two they came for, and the other eight are evidence rather than deliverables.
+    """
     fs = ws.fs
     files = sorted(p for p in local_output.glob("*") if p.is_file())
     if not files:
         raise RuntimeError("the pipeline produced no output files")
 
+    patterns = main_patterns or []
     arch = fs.ensure_folder(ws.archive, stamp)
+    latest_extras = arch_extras = None
     links = {}
-    for f in files:
-        got = fs.upload(f, ws.latest)
-        links[f.name] = f"https://drive.google.com/file/d/{got['id']}/view"
-        fs.upload(f, arch)
-        log(f"      {f.stat().st_size:>10,}  {f.name}")
 
+    for f in files:
+        if is_main_output(f.name, patterns):
+            dest, adest, where = ws.latest, arch, ""
+        else:
+            if latest_extras is None:
+                latest_extras = fs.ensure_folder(ws.latest, extras_dir)
+                arch_extras = fs.ensure_folder(arch, extras_dir)
+            dest, adest, where = latest_extras, arch_extras, f"{extras_dir}/"
+        got = fs.upload(f, dest)
+        links[f.name] = f"https://drive.google.com/file/d/{got['id']}/view"
+        fs.upload(f, adest)
+        log(f"      {f.stat().st_size:>10,}  {where}{f.name}")
+
+    tidy_latest(ws, files, patterns, extras_dir, log=log)
     prune_archive(ws, log=log)
     return links
+
+
+def tidy_latest(ws: Workspace, files, patterns, extras_dir: str, log=print):
+    """Remove anything in latest/ that this run did not produce.
+
+    Without this, a file that stops being generated — or one that used to live
+    at the top level before the split — lingers for ever, and the client reads
+    a stale workbook believing it is current.
+    """
+    produced = {f.name for f in files}
+    main_now = {f.name for f in files if is_main_output(f.name, patterns)}
+    for node in list(ws.fs.children(ws.latest, refresh=True)):
+        if node["mimeType"] == FOLDER_MIME:
+            continue
+        if node["name"] not in main_now:
+            ws.fs.trash(node["id"], ws.latest)
+            reason = ("moved to " + extras_dir if node["name"] in produced
+                      else "no longer produced")
+            log(f"      removed from latest/: {node['name']}  ({reason})")
 
 
 def prune_archive(ws: Workspace, keep: int = ARCHIVE_KEEP, log=print):

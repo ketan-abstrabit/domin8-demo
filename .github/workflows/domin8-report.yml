@@ -2,9 +2,12 @@ name: DOMIN8 report
 
 # Three ways in:
 #
-#   repository_dispatch  the client presses "Run now" in the Drive web app.
-#                        This is the primary path — the report is built when
-#                        someone actually wants it, not on a timer.
+#   repository_dispatch  the client presses a button in the Drive web app.
+#                        run-report    build the report from what is in Drive
+#                        fetch-uniware pull Uniware into input/uniware/ and stop
+#                        Two event types, one workflow, one concurrency group —
+#                        so a fetch can never run while a build is reading the
+#                        same folder.
 #   schedule             a forced run on the 1st and 16th, matching their
 #                        twice-monthly cycle. A backstop, so a cycle still goes
 #                        out if nobody remembers to press the button.
@@ -15,7 +18,7 @@ name: DOMIN8 report
 
 on:
   repository_dispatch:
-    types: [run-report]
+    types: [run-report, fetch-uniware]
   schedule:
     # 08:00 IST on the 1st and 16th. GitHub cron is UTC; IST is UTC+5:30.
     - cron: "30 2 1,16 * *"
@@ -63,6 +66,8 @@ jobs:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          UNIWARE_USER: ${{ secrets.UNIWARE_USER }}
+          UNIWARE_PASS: ${{ secrets.UNIWARE_PASS }}
           # client_payload is the one input here that comes from outside
           # GitHub. Interpolating it straight into the shell would be a script
           # injection; passed as env and quoted below, it is inert.
@@ -71,8 +76,20 @@ jobs:
           EVENT: ${{ github.event_name }}
           INPUT_FORCE: ${{ inputs.force }}
           INPUT_NO_EMAIL: ${{ inputs.no_email }}
+          ACTION: ${{ github.event.action }}
+          PAYLOAD_DAYS: ${{ github.event.client_payload.days }}
         run: |
           set -euo pipefail
+
+          # The fetch button is a different job entirely: it pulls Uniware into
+          # Drive and stops. It must not touch the reports, so it returns here.
+          if [ "${ACTION:-}" = "fetch-uniware" ]; then
+            python run_drive.py --fetch-only \
+              --days "${PAYLOAD_DAYS:-90}" \
+              --requested-by "${PAYLOAD_BY:-}"
+            exit $?
+          fi
+
           FLAGS=""
           # The scheduled cycle run always rebuilds.
           if [ "$EVENT" = "schedule" ]; then FLAGS="$FLAGS --force"; fi

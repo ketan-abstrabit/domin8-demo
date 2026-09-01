@@ -13,6 +13,44 @@ from reconcile import (read_csv, clean_cols, money, num, drop_total_rows,
 
 R = []
 
+UNREADABLE = []
+
+
+class _Skip(Exception):
+    """find() returned nothing; the missing-file check already covers it."""
+
+
+class guard:
+    """Contain a failure to the one check block it came from.
+
+    The verifier picks source files by name and then reads specific columns
+    out of them. A file that is named like a Tally GST export but is not one —
+    a truncated download, a wrong export, a placeholder — raised a KeyError
+    that killed the whole run, even though reconcile.py had already correctly
+    listed it as UNRECOGNISED and excluded it.
+
+    A check that cannot run is a failed check, not a failed pipeline.
+    """
+
+    def __init__(self, label, path=None):
+        self.label, self.path = label, path
+
+    def __enter__(self):
+        if self.path is None:
+            raise _Skip()
+        return self
+
+    def __exit__(self, kind, err, tb):
+        if kind is None:
+            return False
+        if kind is _Skip:
+            return True
+        name = self.path.name if self.path is not None else "?"
+        UNREADABLE.append((self.label, name, f"{kind.__name__}: {err}"))
+        print(f"  !! could not verify '{self.label}' from {name} "
+              f"({kind.__name__}) — recorded as a failed check")
+        return True     # contained: the remaining checks still run
+
 
 def chk(name, raw, got, tol=1.0):
     ok = abs(float(raw) - float(got)) <= tol
@@ -76,87 +114,87 @@ def find(pat, ext=("*.csv", "*.xlsx"), required=True):
 
 # ---- Amazon VC sales ----
 p = find("Sales_ASIN")
-if p:
-    az = clean_cols(read_csv(p, skiprows=1))
-    g = fs[fs.source_type == "amazon_vc_sales"]
-    chk("Amazon VC | ordered units", az["Ordered Units"].sum(), num(g.qty_ordered).sum())
-    chk("Amazon VC | shipped units", az["Shipped Units"].sum(), num(g.qty_sold).sum())
-    chk("Amazon VC | ordered revenue", money(az["Ordered Revenue"]).sum(), num(g.gross_value).sum())
-    chk("Amazon VC | customer returns", az["Customer Returns"].sum(), num(g.qty_returned).sum())
-    chk("Amazon VC | row count", len(az), len(g), 0)
+with guard('Sales_ASIN', p):
+        az = clean_cols(read_csv(p, skiprows=1))
+        g = fs[fs.source_type == "amazon_vc_sales"]
+        chk("Amazon VC | ordered units", az["Ordered Units"].sum(), num(g.qty_ordered).sum())
+        chk("Amazon VC | shipped units", az["Shipped Units"].sum(), num(g.qty_sold).sum())
+        chk("Amazon VC | ordered revenue", money(az["Ordered Revenue"]).sum(), num(g.gross_value).sum())
+        chk("Amazon VC | customer returns", az["Customer Returns"].sum(), num(g.qty_returned).sum())
+        chk("Amazon VC | row count", len(az), len(g), 0)
 
 # ---- Amazon VC inventory ----
 p = find("Inventory_ASIN")
-if p:
-    ai = clean_cols(read_csv(p, skiprows=1))
-    g = fi[fi.source_type == "amazon_vc_inventory"]
-    chk("Amazon VC | sellable on-hand units", ai["Sellable On Hand Units"].sum(),
-        num(g.qty_on_hand).sum())
-    chk("Amazon VC | sellable on-hand value",
-        money(ai["Sellable On-Hand Inventory"]).sum(), num(g.value_on_hand).sum())
+with guard('Inventory_ASIN', p):
+        ai = clean_cols(read_csv(p, skiprows=1))
+        g = fi[fi.source_type == "amazon_vc_inventory"]
+        chk("Amazon VC | sellable on-hand units", ai["Sellable On Hand Units"].sum(),
+            num(g.qty_on_hand).sum())
+        chk("Amazon VC | sellable on-hand value",
+            money(ai["Sellable On-Hand Inventory"]).sum(), num(g.value_on_hand).sum())
 
 # ---- Uniware Tally GST ----
 p = find("Tally GST")
-if p:
-    tg = clean_cols(read_csv(p))
-    g = fs[fs.source_type == "uniware_tally_gst"]
-    chk("Uniware GST | qty", tg["Qty"].sum(), num(g.qty_sold).sum())
-    chk("Uniware GST | invoice total", money(tg["Total"]).sum(), num(g.gross_value).sum())
-    chk("Uniware GST | taxable value", money(tg["Sales"]).sum(),
-        num(g[g.value_basis == "as_reported"].net_value).sum())
-    chk("Uniware GST | row count", len(tg), len(g), 0)
+with guard('Tally GST', p):
+        tg = clean_cols(read_csv(p))
+        g = fs[fs.source_type == "uniware_tally_gst"]
+        chk("Uniware GST | qty", tg["Qty"].sum(), num(g.qty_sold).sum())
+        chk("Uniware GST | invoice total", money(tg["Total"]).sum(), num(g.gross_value).sum())
+        chk("Uniware GST | taxable value", money(tg["Sales"]).sum(),
+            num(g[g.value_basis == "as_reported"].net_value).sum())
+        chk("Uniware GST | row count", len(tg), len(g), 0)
 
 # ---- Uniware returns ----
 p = find("Tally Return")
-if p:
-    tr = clean_cols(read_csv(p))
-    g = fs[fs.source_type == "uniware_returns"]
-    chk("Uniware returns | qty", tr["Qty"].sum(), num(g.qty_returned).sum())
-    chk("Uniware returns | value", money(tr["Total"]).sum(), num(g.returns_value).sum())
+with guard('Tally Return', p):
+        tr = clean_cols(read_csv(p))
+        g = fs[fs.source_type == "uniware_returns"]
+        chk("Uniware returns | qty", tr["Qty"].sum(), num(g.qty_returned).sum())
+        chk("Uniware returns | value", money(tr["Total"]).sum(), num(g.returns_value).sum())
 
 # ---- Uniware inventory ----
 p = find("Inventory Snapshot")
-if p:
-    ui = scope(clean_cols(read_csv(p)))
-    g = fi[fi.source_type == "uniware_inventory"]
-    chk("Uniware inventory | units", ui["Inventory"].sum(), num(g.qty_on_hand).sum())
+with guard('Inventory Snapshot', p):
+        ui = scope(clean_cols(read_csv(p)))
+        g = fi[fi.source_type == "uniware_inventory"]
+        chk("Uniware inventory | units", ui["Inventory"].sum(), num(g.qty_on_hand).sum())
 
 # ---- All Sports ----
 p = find("all sports", ("*.xlsx",))
-if p:
-    s = clean_cols(pd.read_excel(p, sheet_name="Sale Report", header=5))
-    s = s[s["Principal Code"].notna()]
-    g = fs[fs.source_file.str.contains("Sale Report", na=False)]
-    chk("All Sports | sale qty", s["Total Sales Qty"].sum(), num(g.qty_sold).sum())
-    chk("All Sports | basic value", s["Invoice Basic Value"].sum(), num(g.net_value).sum())
-    o = clean_cols(pd.read_excel(p, sheet_name="Soh", header=5))
-    o = o[o["Principal Code"].notna()]
-    g = fi[fi.source_file.str.contains("Soh", na=False)]
-    chk("All Sports | SOH units", o["Total Stock On Hand"].sum(), num(g.qty_on_hand).sum())
+with guard('all sports', p):
+        s = clean_cols(pd.read_excel(p, sheet_name="Sale Report", header=5))
+        s = s[s["Principal Code"].notna()]
+        g = fs[fs.source_file.str.contains("Sale Report", na=False)]
+        chk("All Sports | sale qty", s["Total Sales Qty"].sum(), num(g.qty_sold).sum())
+        chk("All Sports | basic value", s["Invoice Basic Value"].sum(), num(g.net_value).sum())
+        o = clean_cols(pd.read_excel(p, sheet_name="Soh", header=5))
+        o = o[o["Principal Code"].notna()]
+        g = fi[fi.source_file.str.contains("Soh", na=False)]
+        chk("All Sports | SOH units", o["Total Stock On Hand"].sum(), num(g.qty_on_hand).sum())
 
 # ---- Jack & Jill: per-store blocks must equal the file's own Grand Total ----
 p = find("salereport")
-if p:
-    j = read_csv(p, header=None)
-    body = drop_total_rows(j.iloc[2:], 0)
-    g = fs[fs.source_type == "store_blocks"]
-    chk("Jack & Jill | store blocks == file Grand Total",
-        num(body[2]).sum(), num(g.qty_sold).sum())
+with guard('salereport', p):
+        j = read_csv(p, header=None)
+        body = drop_total_rows(j.iloc[2:], 0)
+        g = fs[fs.source_type == "store_blocks"]
+        chk("Jack & Jill | store blocks == file Grand Total",
+            num(body[2]).sum(), num(g.qty_sold).sum())
 p = find("sohreport")
-if p:
-    s = clean_cols(read_csv(p, header=1))
-    s = drop_total_rows(s, s.columns[0])
-    g = fi[fi.source_type == "store_matrix_soh"]
-    chk("Jack & Jill | SOH columns == file Grand Total",
-        num(s["Grand Total"]).sum(), num(g.qty_on_hand).sum())
+with guard('sohreport', p):
+        s = clean_cols(read_csv(p, header=1))
+        s = drop_total_rows(s, s.columns[0])
+        g = fi[fi.source_type == "store_matrix_soh"]
+        chk("Jack & Jill | SOH columns == file Grand Total",
+            num(s["Grand Total"]).sum(), num(g.qty_on_hand).sum())
 
 # ---- INCS ----
 p = find("incs", ("*.xlsx",))
-if p:
-    i = clean_cols(pd.read_excel(p, header=0))
-    g = fs[fs.source_file.str.contains("INCS", na=False)]
-    chk("INCS | qty", i["Qty"].sum(), num(g.qty_sold).sum())
-    chk("INCS | total", i["Total"].sum(), num(g.net_value).sum())
+with guard('incs', p):
+        i = clean_cols(pd.read_excel(p, header=0))
+        g = fs[fs.source_file.str.contains("INCS", na=False)]
+        chk("INCS | qty", i["Qty"].sum(), num(g.qty_sold).sum())
+        chk("INCS | total", i["Total"].sum(), num(g.net_value).sum())
 
 # ---- Uniware purchase orders ----
 fp_path = REP / "fact_purchase.csv"
@@ -204,11 +242,21 @@ for pat in MISSING:
     R.append({"check": f"source file present for '{pat}'", "raw_file": 1,
               "in_report": 0, "diff": -1, "result": "FAIL"})
 
+for label, name, why in UNREADABLE:
+    R.append({"check": f"'{label}' readable from {name}", "raw_file": 1,
+              "in_report": 0, "diff": -1, "result": "FAIL"})
+
 out = pd.DataFrame(R)
 print(out.to_string(index=False))
 if MISSING:
     print(f"\n!! {len(MISSING)} expected source file(s) not found, so their checks "
           f"could not run: {', '.join(MISSING)}")
+if UNREADABLE:
+    print(f"\n!! {len(UNREADABLE)} source file(s) could not be read. The build "
+          f"already excluded them; these checks are marked FAIL so the problem "
+          f"is visible rather than silent:")
+    for label, name, why in UNREADABLE:
+        print(f"     {label:<22} {name}  ({why[:70]})")
 n = (out.result == "PASS").sum()
 print(f"\n{n}/{len(out)} checks pass")
 safe_to_csv(out, REP / "reconciliation_checks.csv")

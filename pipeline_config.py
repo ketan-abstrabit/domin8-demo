@@ -85,6 +85,26 @@ FACILITY = "DOMIN8"
 
 REPORT_TZ = "Asia/Kolkata"
 
+# ---------------------------------------------------------------------------
+# What the client sees first
+#
+# A run produces ten files. Two of them are the report; the rest are evidence,
+# working data and the alert detail. Dropping all ten into one folder makes the
+# client hunt for the two they actually opened the folder for.
+#
+# Anything matching MAIN_OUTPUTS stays in output/latest/. Everything else goes
+# to output/latest/<EXTRAS_DIR>/. The archive is split the same way.
+#
+# Patterns are fnmatch, so a date-stamped filename still matches.
+# ---------------------------------------------------------------------------
+
+MAIN_OUTPUTS = [
+    "Omnichannel_Report*.xlsx",
+    "Stock_vs_Sales*.xlsx",
+]
+
+EXTRAS_DIR = "extras"
+
 # Reports to pull. These are the `name` values in uniware_exports.py's REPORTS
 # dict -- not the dropdown labels.
 UNIWARE_REPORTS = [

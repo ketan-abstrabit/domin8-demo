@@ -31,6 +31,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -96,6 +97,132 @@ def run_pipeline(args) -> int:
         for ln in (proc.stderr or "").strip().splitlines()[-15:]:
             log("    ! " + ln)
     return proc.returncode
+
+
+# ---------------------------------------------------------------------------
+# fetch — a separate button, on purpose
+#
+# Folding the Uniware pull into Run would put a third-party API in the path of
+# the one button the client presses, so an ERP outage would read to them as
+# "the report is broken". Kept apart, a failed fetch changes nothing: the
+# previous pull is still in Drive and Run still works on it.
+#
+# It also means the client can skip it entirely and upload the five Uniware
+# exports by hand, exactly as they do today.
+# ---------------------------------------------------------------------------
+
+PULL_STATE = "uniware_pull.json"
+FETCH_STATE = "last_fetch.json"
+
+UNIWARE_SCRIPT = "uniware_exports.py"
+
+
+def fetch_cycle(args) -> int:
+    started = datetime.now(timezone.utc)
+    local = DS.to_local(started)
+    run_id = local.strftime("%d %b %Y, %H:%M")
+    who = (getattr(args, "requested_by", "") or "").strip()
+
+    log(f"DOMIN8 · Uniware fetch · {run_id}"
+        + (f" · requested by {who}" if who else ""))
+
+    if not (os.environ.get("UNIWARE_USER") and os.environ.get("UNIWARE_PASS")):
+        log("\nFAILED: UNIWARE_USER / UNIWARE_PASS are not set. Add them as "
+            "repository secrets before using the fetch button.")
+        return 1
+
+    log("\n[0] connecting to Drive")
+    fs = DS.DriveFS(DS.build_service(key_file=args.key_file), args.root_id, log=log)
+    DS.preflight(fs)
+    ws = DS.Workspace(fs, log=log)
+
+    tmp = Path(tempfile.mkdtemp(prefix="uniware_"))
+    try:
+        # -- 1  pull from Uniware ----------------------------------------
+        log(f"\n[1] pulling {args.days} days from Uniware")
+        env = dict(os.environ, UNIWARE_OUTDIR=str(tmp))
+        if C.FACILITY:
+            env["UNIWARE_FACILITY"] = C.FACILITY
+        cmd = [sys.executable, str(HERE / UNIWARE_SCRIPT), "--days", str(args.days)]
+        if C.FACILITY:
+            cmd += ["--facility", C.FACILITY]
+
+        try:
+            proc = subprocess.run(cmd, cwd=str(HERE), env=env, text=True,
+                                  capture_output=True, timeout=args.fetch_timeout)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(
+                f"Uniware did not finish within {args.fetch_timeout}s. Nothing "
+                f"was changed — the previous pull is still in input/uniware/.")
+
+        for ln in (proc.stdout or "").strip().splitlines()[-20:]:
+            log("    " + ln)
+        if proc.returncode != 0:
+            for ln in (proc.stderr or "").strip().splitlines()[-10:]:
+                log("    ! " + ln)
+            raise RuntimeError(f"uniware_exports.py exited {proc.returncode}")
+
+        pulled = sorted(p for p in tmp.rglob("*.csv") if p.is_file())
+        if not pulled:
+            raise RuntimeError("Uniware returned no files")
+
+        # -- 2  publish into input/uniware/ ------------------------------
+        #
+        # The files go to Drive, not just to this runner's disk. Reports built
+        # from data nobody can see are unauditable, and the report run reads
+        # Drive — so a pull that stayed local would be invisible to it.
+        log(f"\n[2] uploading {len(pulled)} file(s) to input/uniware/")
+        uni = ws.sub["uniware"]
+        uploaded = []
+        for f in pulled:
+            got = fs.upload(f, uni)
+            uploaded.append({"id": got["id"], "name": got["name"]})
+            log(f"      {f.stat().st_size:>10,}  {got['name']}")
+
+        # -- 3  retire the previous pull ---------------------------------
+        #
+        # Uniware stamps its filenames, so every pull would otherwise pile up.
+        # The reconciler would still pick the newest, but the folder becomes
+        # unreadable and the client cannot tell what is current. Only files
+        # this tool uploaded before are removed — anything they put there by
+        # hand is left alone.
+        previous = ws.load_state(PULL_STATE, {}) or {}
+        keep = {u["id"] for u in uploaded}
+        retired = 0
+        for old in previous.get("files", []):
+            if old.get("id") in keep:
+                continue
+            try:
+                fs.trash(old["id"], uni)
+                retired += 1
+            except Exception:                                   # noqa: BLE001
+                pass
+        if retired:
+            log(f"      retired {retired} file(s) from the previous pull")
+
+        ws.save_state(PULL_STATE, {"files": uploaded, "run_id": run_id})
+        ws.save_state(FETCH_STATE, {
+            "ok": True, "run_id": run_id, "files": len(uploaded),
+            "days": args.days, "requested_by": who,
+            "names": [u["name"] for u in uploaded],
+        })
+        log(f"\nDone. {len(uploaded)} Uniware report(s) in input/uniware/. "
+            f"Press Run to build.")
+        return 0
+
+    except Exception as exc:                                    # noqa: BLE001
+        log("\nFAILED: " + str(exc))
+        try:
+            ws.save_state(FETCH_STATE, {
+                "ok": False, "run_id": run_id, "error": str(exc)[:400],
+                "requested_by": who,
+            })
+        except Exception:                                       # noqa: BLE001
+            pass
+        _email_failure("Uniware fetch failed: " + str(exc), run_id)
+        return 1
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -184,8 +311,25 @@ def cycle(args) -> int:
             shutil.rmtree(C.OUTPUT)
         C.OUTPUT.mkdir(parents=True, exist_ok=True)
         rc = run_pipeline(args)
-        if rc != 0:
-            raise RuntimeError(f"run_pipeline.py exited {rc} — see the notes above")
+        # A non-zero exit from run_pipeline.py means "something is worth your
+        # attention", not necessarily "there is no report". It returns 1 for
+        # warnings too — stale inputs, a locked file, a check that could not be
+        # verified — after building everything successfully. Throwing that away
+        # would mean one aged Amazon export costs the client their whole cycle.
+        #
+        # So the outputs decide. If the two headline workbooks are there, the
+        # build worked; the warnings are carried into STATUS.txt where someone
+        # can act on them. If they are not, it really did fail.
+        built = [p.name for p in C.OUTPUT.glob("*") if p.is_file()]
+        headline = [n for n in built
+                    if DS.is_main_output(n, getattr(C, "MAIN_OUTPUTS", []))]
+        if rc != 0 and not headline:
+            raise RuntimeError(f"run_pipeline.py exited {rc} and produced no "
+                               f"report — see the notes above")
+        warned = rc != 0
+        if warned:
+            log(f"    run_pipeline.py exited {rc} but produced "
+                f"{len(built)} file(s) — treating as warnings, see STATUS.txt")
 
         # -- 4  alerts ---------------------------------------------------
         log("\n[4] alerts")
@@ -201,7 +345,10 @@ def cycle(args) -> int:
 
         # -- 5  push -----------------------------------------------------
         log("\n[5] publishing to Drive")
-        links = DS.push_outputs(ws, C.OUTPUT, stamp, log=log)
+        links = DS.push_outputs(ws, C.OUTPUT, stamp,
+                                main_patterns=getattr(C, "MAIN_OUTPUTS", []),
+                                extras_dir=getattr(C, "EXTRAS_DIR", "extras"),
+                                log=log)
         ws.save_state_file(STATE_DIR / ALERT_STATE)
         if C.PO_HISTORY_FILE.exists():
             ws.save_state_file(C.PO_HISTORY_FILE)
@@ -226,7 +373,11 @@ def cycle(args) -> int:
              else "No email sent this run (nothing changed, or SMTP not configured)."),
             f"Archived as output/archive/{stamp}/.",
             (f"Requested by {who}." if who else "Started by the schedule."),
-        ])
+        ] + ([
+            "",
+            "WARNINGS — the report was built, but something wants attention:",
+        ] + [f"  {ln.strip()}" for ln in _log_lines
+             if ln.strip().startswith("- ")][-8:] if warned else []))
         log(f"\nDone. {len(links)} file(s) published to output/latest/.")
         return 0
 
@@ -295,6 +446,12 @@ def main():
                     help="pull Uniware over the API before building")
     ap.add_argument("--days", type=int, default=C.DEFAULT_DAYS)
     ap.add_argument("--asof", help="Stock vs Sales report date, YYYY-MM-DD")
+    ap.add_argument("--fetch-only", action="store_true",
+                    help="pull Uniware into Drive input/uniware/ and stop. "
+                         "This is what the client's 'Fetch Uniware' button does; "
+                         "it never touches the reports.")
+    ap.add_argument("--fetch-timeout", type=int, default=1500,
+                    help="seconds to allow the Uniware pull (default 1500)")
     ap.add_argument("--requested-by", default="",
                     help="who pressed Run now, recorded in STATUS.txt so the "
                          "client can see who asked for a cycle and when")
@@ -302,7 +459,7 @@ def main():
 
     if not a.root_id:
         ap.error("--root-id (or DRIVE_ROOT_ID) is required")
-    return cycle(a)
+    return fetch_cycle(a) if a.fetch_only else cycle(a)
 
 
 if __name__ == "__main__":

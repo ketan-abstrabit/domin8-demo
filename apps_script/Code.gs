@@ -129,6 +129,60 @@ function triggerRun(force) {
 }
 
 
+/**
+ * Pull the Uniware reports into Drive, and stop.
+ *
+ * Deliberately a separate button from Run. If Uniware is down, this fails and
+ * the report is untouched — the previous pull is still in input/uniware/ and
+ * Run still works. The client can also ignore this button entirely and upload
+ * the five exports by hand, exactly as they do today.
+ */
+function triggerFetch(days) {
+  var cache = CacheService.getScriptCache();
+  if (cache.get('fetch_cooldown')) {
+    return {
+      ok: false,
+      message: 'A pull was started less than two minutes ago. Uniware takes a ' +
+               'few minutes to build its exports.'
+    };
+  }
+
+  var who = '';
+  try { who = Session.getActiveUser().getEmail() || ''; } catch (e) { who = ''; }
+
+  try {
+    gh_('post', '/repos/' + prop_('GITHUB_REPO', true) + '/dispatches', {
+      event_type: 'fetch-uniware',
+      client_payload: { days: days || 90, requested_by: who }
+    });
+  } catch (err) {
+    return { ok: false, message: String(err.message || err) };
+  }
+
+  cache.put('fetch_cooldown', '1', COOLDOWN_SECONDS);
+  console.log('uniware fetch requested by ' + (who || 'unknown'));
+  return { ok: true, message: 'Pulling the last ' + (days || 90) + ' days.' };
+}
+
+/** How the last Uniware pull went, from _state/last_fetch.json. */
+function fetchStatus() {
+  try {
+    var root = DriveApp.getFolderById(prop_('DRIVE_ROOT_ID', true));
+    var st = root.getFoldersByName('_state');
+    if (!st.hasNext()) return { known: false };
+    var f = st.next().getFilesByName('last_fetch.json');
+    if (!f.hasNext()) return { known: false };
+    var j = JSON.parse(f.next().getBlob().getDataAsString());
+    return {
+      known: true, ok: j.ok === true, run_id: j.run_id || '',
+      files: j.files || 0, error: j.error || '', by: j.requested_by || ''
+    };
+  } catch (err) {
+    return { known: false };
+  }
+}
+
+
 // ---------------------------------------------------------------------------
 // status
 // ---------------------------------------------------------------------------

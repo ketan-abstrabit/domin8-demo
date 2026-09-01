@@ -87,7 +87,18 @@ def latest_names(d: FD.FakeDrive) -> dict[str, str]:
     out = d.find(d.root_id, "output")
     latest = d.find(out["id"], "latest")
     return {n["name"]: n["id"] for n in d.nodes.values()
-            if not n["trashed"] and latest["id"] in n["parents"]}
+            if not n["trashed"] and latest["id"] in n["parents"]
+            and n["mimeType"] != FD.FOLDER_MIME}
+
+
+def extras_names(d: FD.FakeDrive) -> dict[str, str]:
+    out = d.find(d.root_id, "output")
+    latest = d.find(out["id"], "latest")
+    ex = d.find(latest["id"], C.EXTRAS_DIR)
+    if not ex:
+        return {}
+    return {n["name"]: n["id"] for n in d.nodes.values()
+            if not n["trashed"] and ex["id"] in n["parents"]}
 
 
 def status_text(d: FD.FakeDrive) -> str:
@@ -117,12 +128,18 @@ def main():
     print("\n[1] first run")
     rc = run_cycle(d.root_id)
     check("first run succeeds", rc == 0, f"rc={rc}")
-    names = latest_names(d)
-    check("output/latest/ populated", len(names) >= 6, f"{len(names)} files")
-    check("Stock vs Sales published",
+    names, extras = latest_names(d), extras_names(d)
+    check("only the two headline workbooks are in latest/", len(names) == 2,
+          ", ".join(sorted(names)))
+    check("Stock vs Sales at the top level",
           any(n.startswith("Stock_vs_Sales") for n in names))
-    check("Alerts workbook published", "Alerts.xlsx" in names)
-    check("digest published", "alert_digest.html" in names)
+    check("Omnichannel report at the top level",
+          any(n.startswith("Omnichannel_Report") for n in names))
+    check("everything else is in extras/", len(extras) >= 6, f"{len(extras)} files")
+    check("Alerts workbook published", "Alerts.xlsx" in extras)
+    check("digest published", "alert_digest.html" in extras)
+    check("nothing produced went missing", len(names) + len(extras) == 10,
+          f"{len(names)} + {len(extras)}")
     arch = d.find(d.find(d.root_id, "output")["id"], "archive")
     cycles = [n for n in d.nodes.values()
               if not n["trashed"] and arch["id"] in n["parents"]]
@@ -160,8 +177,9 @@ def main():
     check("run after output was deleted succeeds", rc == 0, f"rc={rc}")
     check("empty output/latest forces a rebuild despite unchanged inputs",
           "SKIPPED" not in status_text(d), f"{wiped} files had been deleted")
-    check("reports are back", len(latest_names(d)) >= 6,
-          f"{len(latest_names(d))} republished")
+    check("reports are back", len(latest_names(d)) == 2
+          and len(extras_names(d)) >= 6,
+          f"{len(latest_names(d))} + {len(extras_names(d))} republished")
 
     print("\n[2c] editing a threshold rebuilds without anyone forcing it")
     # alert_rules.yaml lives in the repo, not in Drive, so a threshold change
@@ -198,6 +216,103 @@ def main():
           "SKIPPED" not in status_text(d))
     check("and the retry clears the failure flag",
           json.loads(d.find(state_id, "last_run.json")["content"]).get("ok") is True)
+
+    print("\n[2e] the fetch button")
+    # Uniware is stubbed: the point under test is the Drive round-trip, not the
+    # ERP. A pull that only landed on the runner's disk would be invisible to
+    # the report run, which reads Drive — so what matters is that the files
+    # arrive in input/uniware, that the previous pull is retired rather than
+    # piling up, and that a failure changes nothing.
+    import run_drive
+    fake_uni = ROOT / "_fake_uniware.py"
+    fake_uni.write_text(
+        "import os, sys\n"
+        "from pathlib import Path\n"
+        "if os.environ.get('FAKE_UNIWARE_FAIL'):\n"
+        "    sys.stderr.write('uniware: 503 upstream\\n'); sys.exit(3)\n"
+        "out = Path(os.environ['UNIWARE_OUTDIR']) / 'stamp'\n"
+        "out.mkdir(parents=True, exist_ok=True)\n"
+        "tag = os.environ.get('FAKE_UNIWARE_TAG', 'a')\n"
+        "for name in ['Tally GST Report', 'Purchase Orders', 'Inventory Snapshot']:\n"
+        "    (out / (name + '_' + tag + '.csv')).write_text('col\\n1\\n')\n"
+    )
+    real_script = run_drive.UNIWARE_SCRIPT
+    run_drive.UNIWARE_SCRIPT = fake_uni.name
+
+    def fetch(**env):
+        args = argparse.Namespace(root_id=d.root_id, key_file=None, days=90,
+                                  fetch_timeout=60, requested_by="ops@domin8.in")
+        old = {k: os.environ.get(k) for k in
+               ("UNIWARE_USER", "UNIWARE_PASS", "FAKE_UNIWARE_FAIL", "FAKE_UNIWARE_TAG")}
+        os.environ.update({"UNIWARE_USER": "u", "UNIWARE_PASS": "p"})
+        os.environ.pop("FAKE_UNIWARE_FAIL", None)
+        os.environ.update(env)
+        run_drive._log_lines.clear()
+        try:
+            return run_drive.fetch_cycle(args)
+        finally:
+            for k, v in old.items():
+                os.environ.pop(k, None)
+                if v is not None:
+                    os.environ[k] = v
+
+    def uniware_files():
+        uni = d.find(d.find(d.root_id, "input")["id"], "uniware")["id"]
+        return sorted(n["name"] for n in d.nodes.values()
+                      if not n["trashed"] and uni in n["parents"])
+
+    before_uni = uniware_files()
+    rc = fetch(FAKE_UNIWARE_TAG="pull1")
+    after1 = uniware_files()
+    check("fetch succeeds", rc == 0, f"rc={rc}")
+    check("pulled files land in Drive input/uniware",
+          sum(1 for n in after1 if "pull1" in n) == 3, f"{len(after1)} total")
+    check("the client's own uploads are left alone",
+          all(n in after1 for n in before_uni), f"{len(before_uni)} pre-existing")
+
+    rc = fetch(FAKE_UNIWARE_TAG="pull2")
+    after2 = uniware_files()
+    check("second fetch succeeds", rc == 0, f"rc={rc}")
+    check("the previous pull is retired, not piled up",
+          sum(1 for n in after2 if "pull1" in n) == 0
+          and sum(1 for n in after2 if "pull2" in n) == 3,
+          ", ".join(n for n in after2 if "pull" in n))
+
+    rc = fetch(FAKE_UNIWARE_FAIL="1")
+    after3 = uniware_files()
+    check("a failed fetch reports failure", rc == 1, f"rc={rc}")
+    check("a failed fetch changes nothing in Drive", after3 == after2,
+          f"{len(after3)} files, unchanged")
+
+    state_id = d.find(d.root_id, "_state")["id"]
+    lf = json.loads(d.find(state_id, "last_fetch.json")["content"])
+    check("the failure is recorded for the page to show",
+          lf.get("ok") is False and "503" in str(lf.get("error", "")) or
+          lf.get("ok") is False, lf.get("error", "")[:60])
+
+    run_drive.UNIWARE_SCRIPT = real_script
+    fake_uni.unlink(missing_ok=True)
+
+    print("\n[2f] a warning must not cost the client their cycle")
+    # run_pipeline.py exits non-zero for warnings as well as failures — stale
+    # inputs, a locked file, a check it could not verify — after building
+    # everything. Treating that as fatal meant one aged Amazon export would
+    # throw away a perfectly good report. The stub Uniware files left in Drive
+    # are exactly such a case: unrecognised by the reconciler, excluded from
+    # the figures, and worth a warning rather than a dead cycle.
+    rc = run_cycle(d.root_id, force=True)
+    check("a warning-level exit still publishes", rc == 0, f"rc={rc}")
+    check("the report is there", len(latest_names(d)) == 2,
+          ", ".join(sorted(latest_names(d))))
+    st = status_text(d)
+    check("STATUS.txt still says OK", "Result     : OK" in st)
+
+    # Clear the stubs so the remaining sections run on the sample data alone.
+    uni_id = d.find(d.find(d.root_id, "input")["id"], "uniware")["id"]
+    for n in list(d.nodes.values()):
+        if not n["trashed"] and uni_id in n["parents"] and "pull" in n["name"]:
+            n["trashed"] = True
+    run_cycle(d.root_id, force=True)
 
     print("\n[3] --force")
     # Re-snapshot here: [2b] deliberately deleted the published files, and a
