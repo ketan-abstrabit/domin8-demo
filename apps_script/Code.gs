@@ -22,9 +22,30 @@
  *   Then run selftest() once from the editor and read the log.
  */
 
+/**
+ * Bump this whenever Code.gs or Index.html changes.
+ *
+ * Editing the files does not change the live web app — only Deploy > Manage
+ * deployments > New version does. That distinction has cost real debugging
+ * time twice, with no way to tell a stale deployment from a broken one. The
+ * page prints this in its footer and selftest reports it, so "which code is
+ * actually running" is a five-second question instead of an argument.
+ */
+var BUILD = '2026-09-01c  (fetch button)';
+
 var EVENT_TYPE = 'run-report';
 var COOLDOWN_SECONDS = 120;
 var API = 'https://api.github.com';
+
+
+/** What the deployed code can do. The page uses this to prove it is current. */
+function buildInfo() {
+  return {
+    build: BUILD,
+    has_fetch: (typeof triggerFetch === 'function'),
+    has_status: (typeof fetchStatus === 'function')
+  };
+}
 
 
 // ---------------------------------------------------------------------------
@@ -129,6 +150,60 @@ function triggerRun(force) {
 }
 
 
+/**
+ * Pull the Uniware reports into Drive, and stop.
+ *
+ * Deliberately a separate button from Run. If Uniware is down, this fails and
+ * the report is untouched — the previous pull is still in input/uniware/ and
+ * Run still works. The client can also ignore this button entirely and upload
+ * the five exports by hand, exactly as they do today.
+ */
+function triggerFetch(days) {
+  var cache = CacheService.getScriptCache();
+  if (cache.get('fetch_cooldown')) {
+    return {
+      ok: false,
+      message: 'A pull was started less than two minutes ago. Uniware takes a ' +
+               'few minutes to build its exports.'
+    };
+  }
+
+  var who = '';
+  try { who = Session.getActiveUser().getEmail() || ''; } catch (e) { who = ''; }
+
+  try {
+    gh_('post', '/repos/' + prop_('GITHUB_REPO', true) + '/dispatches', {
+      event_type: 'fetch-uniware',
+      client_payload: { days: days || 90, requested_by: who }
+    });
+  } catch (err) {
+    return { ok: false, message: String(err.message || err) };
+  }
+
+  cache.put('fetch_cooldown', '1', COOLDOWN_SECONDS);
+  console.log('uniware fetch requested by ' + (who || 'unknown'));
+  return { ok: true, message: 'Pulling the last ' + (days || 90) + ' days.' };
+}
+
+/** How the last Uniware pull went, from _state/last_fetch.json. */
+function fetchStatus() {
+  try {
+    var root = DriveApp.getFolderById(prop_('DRIVE_ROOT_ID', true));
+    var st = root.getFoldersByName('_state');
+    if (!st.hasNext()) return { known: false };
+    var f = st.next().getFilesByName('last_fetch.json');
+    if (!f.hasNext()) return { known: false };
+    var j = JSON.parse(f.next().getBlob().getDataAsString());
+    return {
+      known: true, ok: j.ok === true, run_id: j.run_id || '',
+      files: j.files || 0, error: j.error || '', by: j.requested_by || ''
+    };
+  } catch (err) {
+    return { known: false };
+  }
+}
+
+
 // ---------------------------------------------------------------------------
 // status
 // ---------------------------------------------------------------------------
@@ -149,12 +224,20 @@ function runStatus() {
     var list = (runs && runs.workflow_runs) || [];
     if (list.length) {
       var r = list[0];
+      // A fetch and a build look identical here unless the event type is
+      // read. Telling someone "building the report" while it is actually
+      // talking to Uniware is worse than saying nothing.
+      var isFetch = (r.display_title || '').indexOf('fetch-uniware') > -1;
+      out.kind = isFetch ? 'fetch' : 'report';
       if (r.status === 'queued' || r.status === 'in_progress' ||
           r.status === 'waiting' || r.status === 'requested') {
         out.phase = 'running';
-        out.label = (r.status === 'queued') ? 'Queued' : 'Building the report';
+        out.label = (r.status === 'queued') ? 'Queued'
+                  : isFetch ? 'Pulling from Uniware' : 'Building the report';
         out.detail = 'Started ' + ago_(r.run_started_at || r.created_at) +
-                     '. This usually takes three to four minutes.';
+                     (isFetch ? '. Uniware builds each export on its side, '
+                              + 'so this can take several minutes.'
+                              : '. This usually takes three to four minutes.');
       } else if (r.conclusion === 'success') {
         out.phase = 'ok';
         out.label = 'Last run finished';
@@ -287,6 +370,15 @@ function selftest() {
       lines.push('  FAIL  ' + name + '\n          ' + String(err.message || err));
     }
   }
+
+  check('deployed build', function () {
+    var b = buildInfo();
+    if (!b.has_fetch) {
+      throw new Error('this Code.gs has no triggerFetch — the Fetch button ' +
+                      'cannot work. Paste the current apps_script/Code.gs.');
+    }
+    return b.build;
+  });
 
   check('GITHUB_REPO is set', function () {
     var r = prop_('GITHUB_REPO', true);

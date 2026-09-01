@@ -548,46 +548,124 @@ def fingerprint(manifest: dict) -> str:
 ARCHIVE_KEEP = 12
 
 
-def push_outputs(ws: Workspace, local_output: Path, stamp: str, log=print) -> dict:
-    """Publish output/ to Drive: latest/ overwritten, archive/<stamp>/ added."""
+def is_main_output(name: str, patterns: list[str]) -> bool:
+    from fnmatch import fnmatch
+    return any(fnmatch(name, p) for p in patterns)
+
+
+def push_outputs(ws: Workspace, local_output: Path, stamp: str,
+                 main_patterns: list[str] | None = None,
+                 extras_dir: str = "extras", log=print) -> dict:
+    """Publish output/ to Drive: latest/ overwritten, archive/<stamp>/ added.
+
+    The two headline workbooks sit at the top of latest/; the supporting files
+    go one level down. A folder holding ten files makes the client hunt for the
+    two they came for, and the other eight are evidence rather than deliverables.
+    """
     fs = ws.fs
     files = sorted(p for p in local_output.glob("*") if p.is_file())
     if not files:
         raise RuntimeError("the pipeline produced no output files")
 
+    patterns = main_patterns or []
     arch = fs.ensure_folder(ws.archive, stamp)
+    latest_extras = arch_extras = None
     links = {}
-    for f in files:
-        got = fs.upload(f, ws.latest)
-        links[f.name] = f"https://drive.google.com/file/d/{got['id']}/view"
-        fs.upload(f, arch)
-        log(f"      {f.stat().st_size:>10,}  {f.name}")
 
+    for f in files:
+        if is_main_output(f.name, patterns):
+            dest, adest, where = ws.latest, arch, ""
+        else:
+            if latest_extras is None:
+                latest_extras = fs.ensure_folder(ws.latest, extras_dir)
+                arch_extras = fs.ensure_folder(arch, extras_dir)
+            dest, adest, where = latest_extras, arch_extras, f"{extras_dir}/"
+        got = fs.upload(f, dest)
+        links[f.name] = f"https://drive.google.com/file/d/{got['id']}/view"
+        fs.upload(f, adest)
+        log(f"      {f.stat().st_size:>10,}  {where}{f.name}")
+
+    tidy_latest(ws, files, patterns, extras_dir, log=log)
     prune_archive(ws, log=log)
     return links
 
 
+def tidy_latest(ws: Workspace, files, patterns, extras_dir: str, log=print):
+    """Remove anything in latest/ that this run did not produce.
+
+    Without this, a file that stops being generated — or one that used to live
+    at the top level before the split — lingers for ever, and the client reads
+    a stale workbook believing it is current.
+    """
+    produced = {f.name for f in files}
+    main_now = {f.name for f in files if is_main_output(f.name, patterns)}
+    for node in list(ws.fs.children(ws.latest, refresh=True)):
+        if node["mimeType"] == FOLDER_MIME:
+            continue
+        if node["name"] not in main_now:
+            ws.fs.trash(node["id"], ws.latest)
+            reason = ("moved to " + extras_dir if node["name"] in produced
+                      else "no longer produced")
+            log(f"      removed from latest/: {node['name']}  ({reason})")
+
 # Republished as Google Sheets for BI tools, which read native Sheets rather
-# than the .xlsx and .csv files in latest/. Only flat single-grain tables
-# qualify; the workbooks hold several grains per file and cannot be bound to.
-BI_TABLES = ("fact_sales.csv", "fact_inventory.csv", "fact_purchase.csv",
-             "exceptions.csv", "reconciliation_checks.csv")
+# than the .xlsx and .csv files in latest/.
+#
+# Everything tabular goes: the flat CSVs one worksheet each, and the workbooks
+# converted whole — a Google Sheet keeps every tab, and a BI data source binds
+# to one worksheet, so `Stock_vs_Sales` arrives with `sku wise` and
+# `Article wise` each selectable. That is the richest table in the pipeline and
+# leaving it out would have meant rebuilding it from the facts by hand.
+#
+# The two HTML files are not tabular and are not republished; they are already
+# readable as they are.
+BI_CSV = ("fact_sales.csv", "fact_inventory.csv", "fact_purchase.csv",
+          "exceptions.csv", "reconciliation_checks.csv")
+
+BI_WORKBOOKS = ("Stock_vs_Sales*.xlsx", "Alerts*.xlsx", "Omnichannel_Report*.xlsx")
+
+# Kept for the tests and callers that predate the workbook split.
+BI_TABLES = BI_CSV
+
+
+def _bi_name(path: Path) -> str:
+    """A stable Sheet name, so a date-stamped file keeps one data source.
+
+    Stock_vs_Sales_310826.xlsx becomes `Stock_vs_Sales`. Without this every
+    cycle would publish a new name, create a new file, and orphan every chart
+    built on the last one.
+    """
+    stem = path.stem
+    for marker in ("_",):
+        parts = stem.split(marker)
+        if len(parts) > 1 and parts[-1].isdigit():
+            return marker.join(parts[:-1])
+    return stem
 
 
 def push_bi_tables(ws: Workspace, local_output: Path, log=print) -> dict:
-    """Publish the flat tables to output/bi/ as Google Sheets.
+    """Publish everything tabular to output/bi/ as Google Sheets.
 
     Created once, then overwritten in place. A BI data source binds to a file
     ID, so holding the ID steady is what keeps a dashboard working across runs
     without anyone re-linking it.
     """
-    links = {}
-    for fname in BI_TABLES:
-        f = local_output / fname
+    from fnmatch import fnmatch
+
+    wanted = [local_output / n for n in BI_CSV]
+    for pattern in BI_WORKBOOKS:
+        wanted += sorted(p for p in local_output.glob("*.xlsx")
+                         if fnmatch(p.name, pattern))
+
+    links, seen = {}, set()
+    for f in wanted:
         if not f.exists():
-            log(f"      {fname} not produced this run — skipped")
+            log(f"      {f.name} not produced this run — skipped")
             continue
-        sheet = f.stem
+        sheet = _bi_name(f)
+        if sheet in seen:
+            continue
+        seen.add(sheet)
         got = ws.fs.upload(f, ws.bi, sheet, convert_to=SHEET_MIME)
         links[sheet] = f"https://docs.google.com/spreadsheets/d/{got['id']}/edit"
         log(f"      {sheet}  (Google Sheet)")

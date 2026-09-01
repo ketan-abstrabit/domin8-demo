@@ -152,43 +152,57 @@ Give the client edit access to the shared drive and tell them three things:
 Looker Studio cannot read the `.xlsx` and `.csv` files in `output/latest/`. Its
 Sheets connector opens native Google Sheets only, and the "Google Drive"
 connector in the gallery is a third-party one that lists files and folders —
-metadata, not their contents. So each run also republishes the flat tables to
-`output/bi/` as Google Sheets, which the connector does read:
+metadata, not their contents. So each run also republishes everything tabular
+to `output/bi/` as Google Sheets, which the connector does read:
 
-```
-fact_sales              one row per sale
-fact_inventory          one row per SKU and location
-fact_purchase           one row per purchase order line
-exceptions              identifiers that could not be resolved
-reconciliation_checks   the verifier's results
-```
+| Sheet | Worksheets you can bind to |
+|---|---|
+| `Stock_vs_Sales` | `sku wise`, `Article wise`, `Action list`, and the reference tabs |
+| `Alerts` | `Summary`, `New this run`, and one per alert type |
+| `Omnichannel_Report` | 18 tabs — channels, stores, POs, returns, audit |
+| `fact_sales` | one row per sale |
+| `fact_inventory` | one row per SKU and location |
+| `fact_purchase` | one row per purchase-order line |
+| `exceptions` | identifiers that could not be resolved |
+| `reconciliation_checks` | the verifier's results |
 
-The workbooks in `latest/` are not republished. Each holds several sheets at
-different grains, and a data source binds to one worksheet — there is no single
-table to point at. Anything in them can be rebuilt as a chart on the facts.
+A workbook converts whole — every tab survives — and a data source binds to one
+worksheet, so `sku wise` is directly usable rather than something to rebuild
+from the facts.
 
-One-time, per table:
+The file names have the date stripped (`Stock_vs_Sales_310826.xlsx` publishes
+as `Stock_vs_Sales`), because a name that changed each cycle would create a new
+file every run and orphan every chart built on the last one.
+
+The two HTML files are not republished. They are not tabular, and they are
+already readable as they are.
+
+### One-time, per worksheet you want to chart
 
 1. Looker Studio → **Create → Data source → Google Sheets**.
 2. **OPEN FROM GOOGLE DRIVE** → `DOMIN8 Reporting` → `output` → `bi` → the
-   table. If the picker will not show it, open the sheet in Drive and paste its
+   sheet. If the picker will not show it, open the sheet in Drive and paste its
    URL into the **URL** tab instead.
-3. Tick **Use first row as headers**. Connect.
-4. Set **Data freshness** to 15 minutes. The sheets only change when a run
+3. Pick the **worksheet** — this is the step people miss on the workbooks.
+   `Stock_vs_Sales` alone is not a data source; `Stock_vs_Sales / sku wise` is.
+4. Tick **Use first row as headers**. Connect.
+5. Set **Data freshness** to 15 minutes. The sheets only change when a run
    happens, so anything shorter only adds queries.
 
-A data source binds to a Drive file ID, and the run overwrites these sheets in
-place rather than replacing them, so the IDs hold and the dashboard survives
-every run without re-linking. Deleting a sheet from `bi/` breaks that — the
-next run creates a new file with a new ID and the data source has to be
-repointed.
+Start with **`Stock_vs_Sales / sku wise`** and **`Alerts / Summary`**. Those two
+carry most of what the client asked for; the fact tables are for trends the
+workbooks do not already answer.
 
-Set **Data freshness** to 15 minutes on each source. The sheets only change
-when a run happens, so anything shorter just adds queries.
+### Two things that will break it
 
-The data source runs on the credentials of whoever creates it. Use an account
-that will keep access to the shared drive — if it is a personal one and that
-person leaves, every report built on it stops.
+**Deleting a sheet from `bi/`.** A data source binds to a Drive file ID. The run
+overwrites in place so the IDs hold and dashboards survive every cycle — but
+delete one and the next run creates a new file with a new ID, and every report
+on it has to be repointed.
+
+**Building the data source on a personal account.** It runs on the credentials
+of whoever created it. Use an account that will keep access to the shared
+drive; if that person leaves, every report built on it stops.
 
 ## When it runs
 

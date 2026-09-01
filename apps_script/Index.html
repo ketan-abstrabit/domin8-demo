@@ -36,11 +36,28 @@
   button.run:hover:not(:disabled){opacity:.88}
   button.run:disabled{opacity:.45;cursor:not-allowed}
 
-  .opt{margin-top:14px;color:var(--muted);font-size:13px;display:flex;
+  button.sec{appearance:none;border:1px solid var(--line);border-radius:8px;
+    background:#fff;color:var(--ink);font-size:14px;font-weight:500;
+    padding:9px 16px;cursor:pointer}
+  button.sec:hover:not(:disabled){background:#f9fafb}
+  button.sec:disabled{opacity:.45;cursor:not-allowed}
+
+  .step{display:flex;gap:14px;padding:18px 0;border-bottom:1px solid var(--line)}
+  .step:last-of-type{border-bottom:0;padding-bottom:6px}
+  .step .n{flex:0 0 24px;height:24px;border-radius:50%;background:#f3f4f6;
+    color:var(--muted);font-size:12.5px;font-weight:600;display:flex;
+    align-items:center;justify-content:center;margin-top:1px}
+  .step .s{flex:1;min-width:0}
+  .step .t{font-weight:600;font-size:14.5px}
+  .step .h{color:var(--muted);font-size:13px;margin:3px 0 11px}
+  .fs{color:var(--muted);font-size:12.5px;margin-top:9px}
+  .fs.bad{color:var(--bad)}
+
+  .opt{margin-top:12px;color:var(--muted);font-size:13px;display:flex;
        align-items:center;gap:8px}
   .opt input{margin:0}
 
-  .state{margin-top:22px;padding:14px 16px;border-radius:9px;font-size:14px;
+  .state{margin-top:18px;padding:14px 16px;border-radius:9px;font-size:14px;
          border:1px solid var(--line);background:#f9fafb;color:var(--muted)}
   .state.ok{background:var(--okbg);border-color:var(--okline);color:var(--ok)}
   .state.running{background:var(--busybg);border-color:var(--busyline);color:var(--busy)}
@@ -73,16 +90,34 @@
   <div class="card">
     <div class="head">
       <h1>DOMIN8 reporting</h1>
-      <div class="sub">Upload this cycle's files to <b>input</b> in Drive, then press Run.</div>
+      <div class="sub">Two steps. Uniware can fetch itself; everything else goes in by hand.</div>
     </div>
     <div class="body">
 
-      <button class="run" id="go" onclick="go()">Run the report</button>
+      <div class="step">
+        <div class="n">1</div>
+        <div class="s">
+          <div class="t">Get the Uniware reports</div>
+          <div class="h">Optional. Pulls the last 90 days into <b>input/uniware</b>.
+            Skip it if you would rather upload them yourself.</div>
+          <button class="sec" id="fetch" onclick="fetchNow()">Fetch from Uniware</button>
+          <div class="fs" id="fetchState"></div>
+        </div>
+      </div>
 
-      <label class="opt">
-        <input type="checkbox" id="force">
-        Rebuild even if nothing has changed since the last run
-      </label>
+      <div class="step">
+        <div class="n">2</div>
+        <div class="s">
+          <div class="t">Build the report</div>
+          <div class="h">Uses whatever is in <b>input</b> right now &mdash;
+            Amazon and store files still go in by hand.</div>
+          <button class="run" id="go" onclick="go()">Run the report</button>
+          <label class="opt">
+            <input type="checkbox" id="force">
+            Rebuild even if nothing has changed since the last run
+          </label>
+        </div>
+      </div>
 
       <div class="state" id="state" role="status" aria-live="polite">
         <b>Checking&hellip;</b>
@@ -96,7 +131,8 @@
       <div class="links" id="links"></div>
     </div>
   </div>
-  <div class="note">Reports take three to four minutes. You can close this page &mdash; it keeps running.</div>
+  <div class="note">Reports take three to four minutes. You can close this page &mdash; it keeps running.<br>
+    <span id="build" style="opacity:.7"></span></div>
 </div>
 
 <script>
@@ -131,6 +167,106 @@
     var btn = document.getElementById('go');
     btn.disabled = false;
     btn.textContent = 'Run the report';
+  }
+
+  var fetchPoll = null, fetchWasAt = null, fetchStarted = 0;
+
+  function fetchNow() {
+    var btn = document.getElementById('fetch');
+    btn.disabled = true;
+    btn.textContent = 'Pulling…';
+    setFetch('Asking Uniware for the last 90 days. This takes a few minutes.', false);
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        if (!res.ok) {
+          setFetch(res.message, true);
+        } else {
+          setFetch(res.message + ' The files appear in input/uniware when it ' +
+                   'finishes — then press Run.', false);
+          startPolling();
+          watchFetch();
+        }
+        resetFetch();
+      })
+      .withFailureHandler(function (err) {
+        setFetch(String(err && err.message || err), true);
+        resetFetch();
+      })
+      .triggerFetch(90);
+  }
+
+  function resetFetch() {
+    setTimeout(function () {
+      var b = document.getElementById('fetch');
+      b.disabled = false;
+      b.textContent = 'Fetch from Uniware';
+    }, 6000);
+  }
+
+  function setFetch(msg, bad) {
+    var el = document.getElementById('fetchState');
+    el.className = 'fs' + (bad ? ' bad' : '');
+    el.textContent = msg;
+  }
+
+  /**
+   * Follow the pull to a conclusion.
+   *
+   * Without this the line said "pulling" for ever — on success, on failure and
+   * when nothing had started at all — so the page could not tell anyone which
+   * of the three had happened. It watches _state/last_fetch.json for a run_id
+   * different from the one present when the button was pressed, and gives up
+   * after twelve minutes rather than spinning all afternoon.
+   */
+  function watchFetch() {
+    fetchStarted = Date.now();
+    google.script.run.withSuccessHandler(function (f) {
+      fetchWasAt = (f && f.known) ? (f.run_id || '') : '';
+      if (fetchPoll) clearInterval(fetchPoll);
+      fetchPoll = setInterval(pollFetch, 8000);
+    }).fetchStatus();
+  }
+
+  function pollFetch() {
+    var mins = Math.round((Date.now() - fetchStarted) / 60000);
+    if (mins >= 12) {
+      clearInterval(fetchPoll); fetchPoll = null;
+      setFetch('Still no result after 12 minutes. Check with Abstrabit — the ' +
+               'previous files in input/uniware are untouched, and Run still ' +
+               'works on them.', true);
+      return;
+    }
+    google.script.run.withSuccessHandler(function (f) {
+      if (!f || !f.known || (f.run_id || '') === fetchWasAt) {
+        setFetch('Pulling from Uniware… ' + (mins < 1 ? 'under a minute'
+                 : mins + ' minute' + (mins === 1 ? '' : 's')) + ' so far.', false);
+        return;
+      }
+      clearInterval(fetchPoll); fetchPoll = null;
+      if (f.ok) {
+        setFetch('Pulled ' + f.files + ' report(s) at ' + f.run_id +
+                 '. Now press Run.', false);
+      } else {
+        setFetch('The pull failed: ' + f.error + ' The previous files in ' +
+                 'input/uniware are untouched.', true);
+      }
+    }).fetchStatus();
+  }
+
+  function lastFetch() {
+    google.script.run.withSuccessHandler(function (f) {
+      if (!f || !f.known) {
+        setFetch('Not pulled yet through this page.', false);
+        return;
+      }
+      if (f.ok) {
+        setFetch('Last pulled ' + f.run_id + ' — ' + f.files + ' report(s).', false);
+      } else {
+        setFetch('Last pull failed (' + f.run_id + '): ' + f.error +
+                 ' The previous files in input/uniware are untouched.', true);
+      }
+    }).fetchStatus();
   }
 
   function show(kind, title, detail) {
@@ -187,6 +323,26 @@
 
   refresh();
   links();
+  lastFetch();
+
+  // Print which code is actually deployed. Editing the files does not update
+  // the live app — only a new deployment version does — so a stale deployment
+  // is otherwise indistinguishable from a broken one.
+  google.script.run.withSuccessHandler(function (b) {
+    document.getElementById('build').textContent =
+      'build ' + b.build + (b.has_fetch ? '' : '  — Fetch unavailable in this deployment');
+    if (!b.has_fetch) {
+      var f = document.getElementById('fetch');
+      f.disabled = true;
+      setFetch('This deployment does not include the fetch function. ' +
+               'Abstrabit needs to redeploy a new version.', true);
+    }
+  }).withFailureHandler(function () {
+    document.getElementById('build').textContent =
+      'build unknown — this deployment predates the version marker';
+    var f = document.getElementById('fetch');
+    if (f) { f.disabled = true; }
+  }).buildInfo();
   // If a run happens to be in flight when the page opens, follow it.
   setTimeout(function () {
     var el = document.getElementById('state');
