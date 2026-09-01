@@ -44,6 +44,16 @@ from pathlib import Path
 
 import pipeline_config as C
 
+# Windows consoles default to cp1252, which cannot encode the rupee sign
+# this pipeline prints. That killed a run on a developer machine while
+# working fine in CI, where the console is UTF-8. Force UTF-8 and replace
+# anything unprintable rather than raising: a report must not die over a
+# currency symbol.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+
 WARN: list[str] = []
 
 
