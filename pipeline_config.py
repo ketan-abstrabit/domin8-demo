@@ -101,6 +101,10 @@ REPORT_TZ = "Asia/Kolkata"
 MAIN_OUTPUTS = [
     "Omnichannel_Report*.xlsx",
     "Stock_vs_Sales*.xlsx",
+    # The alerts are the one deliverable the client's brief asked for that did
+    # not exist before. Filing them under extras/ next to the fact tables would
+    # bury the answer to the question they came with.
+    "Alerts*.xlsx",
 ]
 
 EXTRAS_DIR = "extras"

@@ -129,15 +129,17 @@ def main():
     rc = run_cycle(d.root_id)
     check("first run succeeds", rc == 0, f"rc={rc}")
     names, extras = latest_names(d), extras_names(d)
-    check("only the two headline workbooks are in latest/", len(names) == 2,
+    check("only the headline workbooks are in latest/", len(names) == 3,
           ", ".join(sorted(names)))
     check("Stock vs Sales at the top level",
           any(n.startswith("Stock_vs_Sales") for n in names))
     check("Omnichannel report at the top level",
           any(n.startswith("Omnichannel_Report") for n in names))
-    check("everything else is in extras/", len(extras) >= 6, f"{len(extras)} files")
-    check("Alerts workbook published", "Alerts.xlsx" in extras)
+    check("Alerts at the top level — the brief's own ask",
+          "Alerts.xlsx" in names)
+    check("working files are in extras/", len(extras) >= 6, f"{len(extras)} files")
     check("digest published", "alert_digest.html" in extras)
+    check("fact tables stay out of the way", "fact_sales.csv" in extras)
     check("nothing produced went missing", len(names) + len(extras) == 10,
           f"{len(names)} + {len(extras)}")
     arch = d.find(d.find(d.root_id, "output")["id"], "archive")
@@ -177,7 +179,7 @@ def main():
     check("run after output was deleted succeeds", rc == 0, f"rc={rc}")
     check("empty output/latest forces a rebuild despite unchanged inputs",
           "SKIPPED" not in status_text(d), f"{wiped} files had been deleted")
-    check("reports are back", len(latest_names(d)) == 2
+    check("reports are back", len(latest_names(d)) == 3
           and len(extras_names(d)) >= 6,
           f"{len(latest_names(d))} + {len(extras_names(d))} republished")
 
@@ -302,7 +304,7 @@ def main():
     # the figures, and worth a warning rather than a dead cycle.
     rc = run_cycle(d.root_id, force=True)
     check("a warning-level exit still publishes", rc == 0, f"rc={rc}")
-    check("the report is there", len(latest_names(d)) == 2,
+    check("the report is there", len(latest_names(d)) == 3,
           ", ".join(sorted(latest_names(d))))
     st = status_text(d)
     check("STATUS.txt still says OK", "Result     : OK" in st)
