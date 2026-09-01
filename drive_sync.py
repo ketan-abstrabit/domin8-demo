@@ -567,14 +567,15 @@ def push_outputs(ws: Workspace, local_output: Path, stamp: str, log=print) -> di
     return links
 
 
-# The fact tables, republished as Google Sheets for BI tools. Reporting tools
-# read native Sheets, not the .xlsx and .csv files in latest/, so the same rows
-# are published in a format they can connect to.
-BI_TABLES = ("fact_sales.csv", "fact_inventory.csv", "fact_purchase.csv")
+# Republished as Google Sheets for BI tools, which read native Sheets rather
+# than the .xlsx and .csv files in latest/. Only flat single-grain tables
+# qualify; the workbooks hold several grains per file and cannot be bound to.
+BI_TABLES = ("fact_sales.csv", "fact_inventory.csv", "fact_purchase.csv",
+             "exceptions.csv", "reconciliation_checks.csv")
 
 
 def push_bi_tables(ws: Workspace, local_output: Path, log=print) -> dict:
-    """Publish the fact tables to output/bi/ as Google Sheets.
+    """Publish the flat tables to output/bi/ as Google Sheets.
 
     Created once, then overwritten in place. A BI data source binds to a file
     ID, so holding the ID steady is what keeps a dashboard working across runs

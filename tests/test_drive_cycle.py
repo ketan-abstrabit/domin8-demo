@@ -141,9 +141,9 @@ def main():
           (d.find(d.find(d.root_id, "input")["id"], "reorder_status") or {})
           .get("mimeType") == FD.SHEET_MIME)
     bi = bi_sheets(d)
-    check("fact tables published to output/bi/", len(bi) == 3,
+    check("flat tables published to output/bi/", len(bi) == len(DS.BI_TABLES),
           ", ".join(sorted(bi)) or "none")
-    check("fact tables are Google Sheets, not CSV files",
+    check("published tables are Google Sheets, not CSV files",
           all(n["mimeType"] == FD.SHEET_MIME for n in bi.values()))
 
     print("\n[2] runs with nothing changed")

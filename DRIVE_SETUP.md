@@ -121,7 +121,7 @@ the error message names which:
 | `No Google credentials` | `GOOGLE_SA_KEY` missing or not valid JSON |
 
 Then check the drive: `output/latest/` should hold ten files, `output/bi/`
-three Google Sheets, `STATUS.txt` should say `Result : OK`, and `input/` should
+five Google Sheets, `STATUS.txt` should say `Result : OK`, and `input/` should
 have gained a `reorder_status` Google Sheet.
 
 ## 7. Give the client the button
@@ -152,15 +152,30 @@ Give the client edit access to the shared drive and tell them three things:
 Looker Studio cannot read the `.xlsx` and `.csv` files in `output/latest/`. Its
 Sheets connector opens native Google Sheets only, and the "Google Drive"
 connector in the gallery is a third-party one that lists files and folders —
-metadata, not their contents. So each run also republishes the three fact
-tables to `output/bi/` as Google Sheets, which the connector does read.
+metadata, not their contents. So each run also republishes the flat tables to
+`output/bi/` as Google Sheets, which the connector does read:
+
+```
+fact_sales              one row per sale
+fact_inventory          one row per SKU and location
+fact_purchase           one row per purchase order line
+exceptions              identifiers that could not be resolved
+reconciliation_checks   the verifier's results
+```
+
+The workbooks in `latest/` are not republished. Each holds several sheets at
+different grains, and a data source binds to one worksheet — there is no single
+table to point at. Anything in them can be rebuilt as a chart on the facts.
 
 One-time, per table:
 
 1. Looker Studio → **Create → Data source → Google Sheets**.
-2. **Shared drives** tab → `DOMIN8 Reporting` → `output` → `bi` →
-   `fact_sales`, `fact_inventory` or `fact_purchase`.
+2. **OPEN FROM GOOGLE DRIVE** → `DOMIN8 Reporting` → `output` → `bi` → the
+   table. If the picker will not show it, open the sheet in Drive and paste its
+   URL into the **URL** tab instead.
 3. Tick **Use first row as headers**. Connect.
+4. Set **Data freshness** to 15 minutes. The sheets only change when a run
+   happens, so anything shorter only adds queries.
 
 A data source binds to a Drive file ID, and the run overwrites these sheets in
 place rather than replacing them, so the IDs hold and the dashboard survives
@@ -234,7 +249,7 @@ input/                    the client fills this
 output/
   latest/                 overwritten each run, file IDs preserved
   archive/<date_time>/    last 12 cycles
-  bi/                     the three fact tables as Google Sheets
+  bi/                     the flat tables as Google Sheets, for BI tools
 STATUS.txt                last run: when, what it read, pass/fail
 _state/                   fingerprints, PO history, alert state — leave alone
 ```
