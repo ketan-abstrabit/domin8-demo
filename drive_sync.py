@@ -624,6 +624,10 @@ BI_CSV = ("fact_sales.csv", "fact_inventory.csv", "fact_purchase.csv",
 
 BI_WORKBOOKS = ("Stock_vs_Sales*.xlsx", "Alerts*.xlsx", "Omnichannel_Report*.xlsx")
 
+# How many Sheets a healthy run publishes. The skip check needs this before the
+# build has produced anything, so it cannot be counted from the output folder.
+BI_EXPECTED = len(BI_CSV) + len(BI_WORKBOOKS)
+
 # Kept for the tests and callers that predate the workbook split.
 BI_TABLES = BI_CSV
 
@@ -641,6 +645,26 @@ def _bi_name(path: Path) -> str:
         if len(parts) > 1 and parts[-1].isdigit():
             return marker.join(parts[:-1])
     return stem
+
+
+def expected_bi_names(local_output: Path) -> list[str]:
+    """The Sheet names a publish of this output folder would produce.
+
+    Shared with the skip check so "is output/bi complete?" is answered by the
+    same rule that fills it, rather than by a number written down twice.
+    """
+    from fnmatch import fnmatch
+    out, seen = [], set()
+    for f in [local_output / n for n in BI_CSV] + [
+            p for pattern in BI_WORKBOOKS
+            for p in sorted(local_output.glob("*.xlsx")) if fnmatch(p.name, pattern)]:
+        if not f.exists():
+            continue
+        name = _bi_name(f)
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
 
 
 def push_bi_tables(ws: Workspace, local_output: Path, log=print) -> dict:

@@ -214,6 +214,29 @@ def main():
           and len(extras_names(d)) >= 6,
           f"{len(latest_names(d))} + {len(extras_names(d))} republished")
 
+    print("\n[2bb] a skip must not leave output/bi half-built")
+    # What happened live: a folder that had been running the old code was
+    # switched to this branch, the inputs had not changed, so the run skipped —
+    # and push_bi_tables only happens after a build. output/bi kept the three
+    # sheets an older version had made and would have stayed that way for ever,
+    # with every run reporting success.
+    outf = d.find(d.root_id, "output")
+    bi_folder = d.find(outf["id"], "bi")
+    keep = sorted(bi_sheets(d))[:3]
+    dropped = 0
+    for n in list(d.nodes.values()):
+        if (not n["trashed"] and bi_folder["id"] in n["parents"]
+                and n["name"] not in keep):
+            n["trashed"] = True
+            dropped += 1
+    rc = run_cycle(d.root_id)
+    check("run with a partial output/bi succeeds", rc == 0, f"rc={rc}")
+    check("a half-built output/bi forces a rebuild",
+          "SKIPPED" not in status_text(d), f"{dropped} sheets had been removed")
+    check("output/bi is complete again", len(bi_sheets(d)) == DS.BI_EXPECTED,
+          f"{len(bi_sheets(d))} of {DS.BI_EXPECTED}")
+    run_cycle(d.root_id)   # settle back to a skip
+
     print("\n[2c] editing a threshold rebuilds without anyone forcing it")
     # alert_rules.yaml lives in the repo, not in Drive, so a threshold change
     # moves nothing the input fingerprint can see. Without the rules in the

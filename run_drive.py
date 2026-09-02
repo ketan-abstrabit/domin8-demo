@@ -336,13 +336,25 @@ def cycle(args) -> int:
         last = ws.load_state(RUN_STATE, {}) or {}
         published = [f for f in fs.children(ws.latest, refresh=True)
                      if f["mimeType"] != DS.FOLDER_MIME]
+        # The BI sheets get the same vote as the reports. They are published
+        # in step 5, so a skipped run never creates them — which meant turning
+        # this feature on for a folder whose inputs had not changed left
+        # output/bi/ empty for ever, with the run reporting success. Whatever
+        # downstream artefact a skip claims is current has to actually exist.
+        bi_now = [f for f in fs.children(ws.bi, refresh=True)
+                  if f["mimeType"] != DS.FOLDER_MIME]
+        bi_wanted = DS.BI_EXPECTED
         log(f"\n[2] input fingerprint {fp}  (last run {last.get('fingerprint', '—')})")
-        log(f"    output/latest holds {len(published)} file(s)")
+        log(f"    output/latest holds {len(published)} file(s), "
+            f"output/bi holds {len(bi_now)}")
 
         if last.get("ok") is False:
             log("    the last run failed — rebuilding rather than skipping")
+        elif fp == last.get("fingerprint") and not args.force and bi_now and len(bi_now) < bi_wanted:
+            log(f"    output/bi has {len(bi_now)} of {bi_wanted} sheets — "
+                "rebuilding to complete it")
         elif fp == last.get("fingerprint") and not args.force:
-            if published:
+            if published and bi_now:
                 log("    unchanged since the last run — nothing to do")
                 DS.write_status(ws, ok=True, started=started, manifest=manifest,
                                 lines=["Inputs are identical to the last run. "
@@ -352,8 +364,8 @@ def cycle(args) -> int:
                                        "even if nothing has changed'."],
                                 skipped=True)
                 return 0
-            log("    inputs unchanged, but output/latest is empty — "
-                "rebuilding rather than reporting reports that are not there")
+            log("    inputs unchanged, but output/latest or output/bi is "
+                "empty — rebuilding rather than claiming they are current")
 
         if args.dry_run:
             log("\n--dry-run: would rebuild here. Stopping.")
