@@ -323,8 +323,11 @@ def main():
           lf.get("ok") is False and "503" in str(lf.get("error", "")) or
           lf.get("ok") is False, lf.get("error", "")[:60])
 
-    run_drive.UNIWARE_SCRIPT = real_script
-    fake_uni.unlink(missing_ok=True)
+    try:
+        pass
+    finally:
+        run_drive.UNIWARE_SCRIPT = real_script
+        fake_uni.unlink(missing_ok=True)
 
     print("\n[2f] a warning must not cost the client their cycle")
     # run_pipeline.py exits non-zero for warnings as well as failures — stale
@@ -389,6 +392,17 @@ def main():
           gone["name"] not in status_text(d), gone["name"])
     check("local mirror dropped it too",
           not (C.INPUT / "retail stores" / gone["name"]).exists())
+    # The verifier must survive a source file going missing. It did not: the
+    # skip path raised out of a context manager's __enter__, which __exit__
+    # never gets to handle, so check_reconcile died and produced nothing —
+    # losing reconciliation_checks.csv from both extras/ and bi/ without any
+    # test noticing, because the run itself still returned 0.
+    check("the verifier still reports when a source file is missing",
+          "reconciliation_checks.csv" in extras_names(d),
+          ", ".join(sorted(extras_names(d))))
+    check("its BI sheet is published too",
+          "reconciliation_checks" in bi_sheets(d),
+          ", ".join(sorted(bi_sheets(d))))
 
     print("\n[6] alert state carries across runs")
     st = json.loads((C.REPORTS / "_state" / "alert_state.json").read_text())

@@ -374,12 +374,17 @@ def cycle(args) -> int:
         # So the outputs decide. If the two headline workbooks are there, the
         # build worked; the warnings are carried into STATUS.txt where someone
         # can act on them. If they are not, it really did fail.
+        # Every headline workbook, not merely one of them. A crash part-way
+        # through leaves some of them on disk, and "at least one exists" was
+        # lenient enough to publish a half-built cycle as a warning.
         built = [p.name for p in C.OUTPUT.glob("*") if p.is_file()]
-        headline = [n for n in built
-                    if DS.is_main_output(n, getattr(C, "MAIN_OUTPUTS", []))]
-        if rc != 0 and not headline:
-            raise RuntimeError(f"run_pipeline.py exited {rc} and produced no "
-                               f"report — see the notes above")
+        patterns = getattr(C, "PIPELINE_OUTPUTS", None) or getattr(C, "MAIN_OUTPUTS", [])
+        missing = [pat for pat in patterns
+                   if not any(DS.is_main_output(n, [pat]) for n in built)]
+        if rc != 0 and missing:
+            raise RuntimeError(
+                f"run_pipeline.py exited {rc} and did not produce "
+                f"{', '.join(missing)} — see the notes above")
         warned = rc != 0
         if warned:
             log(f"    run_pipeline.py exited {rc} but produced "

@@ -109,6 +109,17 @@ MAIN_OUTPUTS = [
 
 EXTRAS_DIR = "extras"
 
+# What run_pipeline.py itself must produce for a build to count as successful.
+#
+# Deliberately not MAIN_OUTPUTS. That list is about placement in Drive and
+# includes Alerts.xlsx, which alerts.py writes in a later step — requiring it
+# of run_pipeline could never pass. These two are the workbooks the build is
+# responsible for, and if either is missing the run failed however it exited.
+PIPELINE_OUTPUTS = [
+    "Omnichannel_Report*.xlsx",
+    "Stock_vs_Sales*.xlsx",
+]
+
 # Reports to pull. These are the `name` values in uniware_exports.py's REPORTS
 # dict -- not the dropdown labels.
 UNIWARE_REPORTS = [
