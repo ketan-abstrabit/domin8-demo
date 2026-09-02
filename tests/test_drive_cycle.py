@@ -29,6 +29,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -101,6 +102,15 @@ def extras_names(d: FD.FakeDrive) -> dict[str, str]:
             if not n["trashed"] and ex["id"] in n["parents"]}
 
 
+def bi_sheets(d: FD.FakeDrive) -> dict[str, dict]:
+    out = d.find(d.root_id, "output")
+    bi = d.find(out["id"], "bi")
+    if not bi:
+        return {}
+    return {n["name"]: n for n in d.nodes.values()
+            if not n["trashed"] and bi["id"] in n["parents"]}
+
+
 def status_text(d: FD.FakeDrive) -> str:
     n = d.find(d.root_id, "STATUS.txt")
     return n["content"].decode() if n else ""
@@ -108,21 +118,32 @@ def status_text(d: FD.FakeDrive) -> str:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--sample", type=Path,
-                    default=Path("/home/claude/deploy/reports/input"))
+    # The repo's own reports/input, so this runs anywhere without arguments.
+    ap.add_argument("--sample", type=Path, default=ROOT / "reports" / "input")
     ap.add_argument("--keep", action="store_true")
     a = ap.parse_args()
 
-    if not a.sample.exists():
-        sys.exit(f"sample inputs not found: {a.sample}\n"
-                 "Point --sample at a reports/input folder.")
+    if not a.sample.exists() or not any(a.sample.rglob("*.csv")):
+        sys.exit(f"No sample inputs at {a.sample}\n"
+                 "Put a cycle's files under reports/input/ (or pass --sample\n"
+                 "pointing at a folder that has them) and run this again.")
+
+    # Snapshot the sample before anything is wiped.
+    #
+    # The default sample IS reports/input, and the run below empties that
+    # folder because the fake Drive has to be the only source of truth. Reading
+    # from a copy means the default can be the obvious path instead of one that
+    # only existed on the machine this was written on.
+    holding = Path(tempfile.mkdtemp(prefix="d8_sample_"))
+    shutil.copytree(a.sample, holding / "input")
+    sample = holding / "input"
 
     # A clean slate: the fake drive is the only source of truth.
     for p in (C.INPUT, C.OUTPUT, C.REPORTS / "_state"):
         shutil.rmtree(p, ignore_errors=True)
 
     print("\n[setup]")
-    d = seed(a.sample)
+    d = seed(sample)
     FD.install(DS, d)
 
     print("\n[1] first run")
@@ -150,6 +171,16 @@ def main():
     check("reorder_status seeded as a Sheet in input/",
           (d.find(d.find(d.root_id, "input")["id"], "reorder_status") or {})
           .get("mimeType") == FD.SHEET_MIME)
+    bi = bi_sheets(d)
+    check("everything tabular published to output/bi/", len(bi) == 8,
+          ", ".join(sorted(bi)) or "none")
+    check("the workbooks are there too, not just the facts",
+          {"Stock_vs_Sales", "Alerts", "Omnichannel_Report"} <= set(bi),
+          ", ".join(sorted(n for n in bi if not n.startswith(("fact", "exce", "reco")))))
+    check("the date stamp is stripped, so the Sheet name is stable",
+          not any(n[-1].isdigit() for n in bi), ", ".join(sorted(bi)))
+    check("published tables are Google Sheets, not CSV files",
+          all(n["mimeType"] == FD.SHEET_MIME for n in bi.values()))
 
     print("\n[2] runs with nothing changed")
     # The first run seeds reorder_status into input/, so the run after it sees
@@ -182,6 +213,29 @@ def main():
     check("reports are back", len(latest_names(d)) == 3
           and len(extras_names(d)) >= 6,
           f"{len(latest_names(d))} + {len(extras_names(d))} republished")
+
+    print("\n[2bb] a skip must not leave output/bi half-built")
+    # What happened live: a folder that had been running the old code was
+    # switched to this branch, the inputs had not changed, so the run skipped —
+    # and push_bi_tables only happens after a build. output/bi kept the three
+    # sheets an older version had made and would have stayed that way for ever,
+    # with every run reporting success.
+    outf = d.find(d.root_id, "output")
+    bi_folder = d.find(outf["id"], "bi")
+    keep = sorted(bi_sheets(d))[:3]
+    dropped = 0
+    for n in list(d.nodes.values()):
+        if (not n["trashed"] and bi_folder["id"] in n["parents"]
+                and n["name"] not in keep):
+            n["trashed"] = True
+            dropped += 1
+    rc = run_cycle(d.root_id)
+    check("run with a partial output/bi succeeds", rc == 0, f"rc={rc}")
+    check("a half-built output/bi forces a rebuild",
+          "SKIPPED" not in status_text(d), f"{dropped} sheets had been removed")
+    check("output/bi is complete again", len(bi_sheets(d)) == DS.BI_EXPECTED,
+          f"{len(bi_sheets(d))} of {DS.BI_EXPECTED}")
+    run_cycle(d.root_id)   # settle back to a skip
 
     print("\n[2c] editing a threshold rebuilds without anyone forcing it")
     # alert_rules.yaml lives in the repo, not in Drive, so a threshold change
@@ -292,8 +346,11 @@ def main():
           lf.get("ok") is False and "503" in str(lf.get("error", "")) or
           lf.get("ok") is False, lf.get("error", "")[:60])
 
-    run_drive.UNIWARE_SCRIPT = real_script
-    fake_uni.unlink(missing_ok=True)
+    try:
+        pass
+    finally:
+        run_drive.UNIWARE_SCRIPT = real_script
+        fake_uni.unlink(missing_ok=True)
 
     print("\n[2f] a warning must not cost the client their cycle")
     # run_pipeline.py exits non-zero for warnings as well as failures — stale
@@ -322,12 +379,19 @@ def main():
     # property under test is that a *republish over an existing file* keeps its
     # id, so the baseline has to be the current set.
     before = latest_names(d)
+    bi_before = {k: v["id"] for k, v in bi_sheets(d).items()}
     rc = run_cycle(d.root_id, force=True)
     after = latest_names(d)
+    bi_after = bi_sheets(d)
     check("forced run rebuilds", rc == 0 and "SKIPPED" not in status_text(d))
     check("file IDs survive a republish — shared links keep working",
           all(before.get(k) == after.get(k) for k in before if k in after),
           f"{len(before)} tracked")
+    check("fact table IDs survive a republish — BI data sources keep working",
+          bi_before and all(bi_before[k] == bi_after[k]["id"] for k in bi_before),
+          f"{len(bi_before)} tracked")
+    check("republished fact tables are still Google Sheets",
+          all(n["mimeType"] == FD.SHEET_MIME for n in bi_after.values()))
 
     print("\n[4] a changed input triggers a rebuild")
     inp = d.find(d.root_id, "input")["id"]
@@ -351,6 +415,17 @@ def main():
           gone["name"] not in status_text(d), gone["name"])
     check("local mirror dropped it too",
           not (C.INPUT / "retail stores" / gone["name"]).exists())
+    # The verifier must survive a source file going missing. It did not: the
+    # skip path raised out of a context manager's __enter__, which __exit__
+    # never gets to handle, so check_reconcile died and produced nothing —
+    # losing reconciliation_checks.csv from both extras/ and bi/ without any
+    # test noticing, because the run itself still returned 0.
+    check("the verifier still reports when a source file is missing",
+          "reconciliation_checks.csv" in extras_names(d),
+          ", ".join(sorted(extras_names(d))))
+    check("its BI sheet is published too",
+          "reconciliation_checks" in bi_sheets(d),
+          ", ".join(sorted(bi_sheets(d))))
 
     print("\n[6] alert state carries across runs")
     st = json.loads((C.REPORTS / "_state" / "alert_state.json").read_text())
@@ -427,8 +502,13 @@ def main():
     check("failure explains what to do",
           "master mapping table" in status_text(empty).lower())
 
+    # Put reports/input back. Running the tests must not cost someone their
+    # sample data — they would have no way to get it back.
+    shutil.rmtree(C.INPUT, ignore_errors=True)
+    shutil.copytree(sample, C.INPUT)
+    shutil.rmtree(holding, ignore_errors=True)
     if not a.keep:
-        for p in (C.INPUT, C.OUTPUT, C.REPORTS / "_state"):
+        for p in (C.OUTPUT, C.REPORTS / "_state"):
             shutil.rmtree(p, ignore_errors=True)
 
     bad_n = sum(1 for r, *_ in results if r == FAIL)

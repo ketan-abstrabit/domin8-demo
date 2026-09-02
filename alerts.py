@@ -37,6 +37,16 @@ from pathlib import Path
 
 import pandas as pd
 
+# Windows consoles default to cp1252, which cannot encode the rupee sign
+# this pipeline prints. That killed a run on a developer machine while
+# working fine in CI, where the console is UTF-8. Force UTF-8 and replace
+# anything unprintable rather than raising: a report must not die over a
+# currency symbol.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+
 SEVERITY_ORDER = {"high": 0, "medium": 1, "info": 2}
 SEVERITY_COLOUR = {"high": "#b42318", "medium": "#b54708", "info": "#175cd3"}
 

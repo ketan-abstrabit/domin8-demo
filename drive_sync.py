@@ -18,6 +18,7 @@ Expected layout in Drive (created on first run if missing):
       output/
         latest/                         overwritten every run, file IDs kept
         archive/2026-08-31_1430/        every previous run
+        bi/                             fact tables as Sheets, for BI tools
       STATUS.txt                        last run: when, what it read, pass/fail
       _state/                           fingerprints, PO history, alert state
 
@@ -284,6 +285,10 @@ class DriveFS:
         Overwrites in place with files().update so the Drive file ID survives —
         anyone who bookmarked last week's report or embedded its link keeps a
         working link instead of a 404 every fortnight.
+
+        `convert_to` applies on update as well as create: without the mimeType
+        on the update body, re-uploading CSV bytes over a Google Sheet turns it
+        back into a plain CSV and every data source bound to it breaks.
         """
         name = name or local.name
         existing = self.find(parent_id, name, folder=False)
@@ -293,11 +298,13 @@ class DriveFS:
             try:
                 if existing:
                     got = self.svc.files().update(
-                        fileId=existing["id"], media_body=media,
+                        fileId=existing["id"],
+                        body={"mimeType": convert_to} if convert_to else None,
+                        media_body=media,
                         fields="id, name, modifiedTime",
                         supportsAllDrives=True,
                     ).execute()
-                    mime = existing["mimeType"]
+                    mime = convert_to or existing["mimeType"]
                 else:
                     body = {"name": name, "parents": [parent_id]}
                     if convert_to:
@@ -394,6 +401,7 @@ class Workspace:
         self.output = fs.ensure_path("output")
         self.latest = fs.ensure_path("output", "latest")
         self.archive = fs.ensure_path("output", "archive")
+        self.bi = fs.ensure_path("output", "bi")
         self.state = fs.ensure_path("_state")
         self.sub = {}
         for key in FOLDER_ALIASES:
@@ -599,6 +607,93 @@ def tidy_latest(ws: Workspace, files, patterns, extras_dir: str, log=print):
             reason = ("moved to " + extras_dir if node["name"] in produced
                       else "no longer produced")
             log(f"      removed from latest/: {node['name']}  ({reason})")
+
+# Republished as Google Sheets for BI tools, which read native Sheets rather
+# than the .xlsx and .csv files in latest/.
+#
+# Everything tabular goes: the flat CSVs one worksheet each, and the workbooks
+# converted whole — a Google Sheet keeps every tab, and a BI data source binds
+# to one worksheet, so `Stock_vs_Sales` arrives with `sku wise` and
+# `Article wise` each selectable. That is the richest table in the pipeline and
+# leaving it out would have meant rebuilding it from the facts by hand.
+#
+# The two HTML files are not tabular and are not republished; they are already
+# readable as they are.
+BI_CSV = ("fact_sales.csv", "fact_inventory.csv", "fact_purchase.csv",
+          "exceptions.csv", "reconciliation_checks.csv")
+
+BI_WORKBOOKS = ("Stock_vs_Sales*.xlsx", "Alerts*.xlsx", "Omnichannel_Report*.xlsx")
+
+# How many Sheets a healthy run publishes. The skip check needs this before the
+# build has produced anything, so it cannot be counted from the output folder.
+BI_EXPECTED = len(BI_CSV) + len(BI_WORKBOOKS)
+
+# Kept for the tests and callers that predate the workbook split.
+BI_TABLES = BI_CSV
+
+
+def _bi_name(path: Path) -> str:
+    """A stable Sheet name, so a date-stamped file keeps one data source.
+
+    Stock_vs_Sales_310826.xlsx becomes `Stock_vs_Sales`. Without this every
+    cycle would publish a new name, create a new file, and orphan every chart
+    built on the last one.
+    """
+    stem = path.stem
+    for marker in ("_",):
+        parts = stem.split(marker)
+        if len(parts) > 1 and parts[-1].isdigit():
+            return marker.join(parts[:-1])
+    return stem
+
+
+def expected_bi_names(local_output: Path) -> list[str]:
+    """The Sheet names a publish of this output folder would produce.
+
+    Shared with the skip check so "is output/bi complete?" is answered by the
+    same rule that fills it, rather than by a number written down twice.
+    """
+    from fnmatch import fnmatch
+    out, seen = [], set()
+    for f in [local_output / n for n in BI_CSV] + [
+            p for pattern in BI_WORKBOOKS
+            for p in sorted(local_output.glob("*.xlsx")) if fnmatch(p.name, pattern)]:
+        if not f.exists():
+            continue
+        name = _bi_name(f)
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
+def push_bi_tables(ws: Workspace, local_output: Path, log=print) -> dict:
+    """Publish everything tabular to output/bi/ as Google Sheets.
+
+    Created once, then overwritten in place. A BI data source binds to a file
+    ID, so holding the ID steady is what keeps a dashboard working across runs
+    without anyone re-linking it.
+    """
+    from fnmatch import fnmatch
+
+    wanted = [local_output / n for n in BI_CSV]
+    for pattern in BI_WORKBOOKS:
+        wanted += sorted(p for p in local_output.glob("*.xlsx")
+                         if fnmatch(p.name, pattern))
+
+    links, seen = {}, set()
+    for f in wanted:
+        if not f.exists():
+            log(f"      {f.name} not produced this run — skipped")
+            continue
+        sheet = _bi_name(f)
+        if sheet in seen:
+            continue
+        seen.add(sheet)
+        got = ws.fs.upload(f, ws.bi, sheet, convert_to=SHEET_MIME)
+        links[sheet] = f"https://docs.google.com/spreadsheets/d/{got['id']}/edit"
+        log(f"      {sheet}  (Google Sheet)")
+    return links
 
 
 def prune_archive(ws: Workspace, keep: int = ARCHIVE_KEEP, log=print):

@@ -40,6 +40,16 @@ from pathlib import Path
 import drive_sync as DS
 import pipeline_config as C
 
+# Windows consoles default to cp1252, which cannot encode the rupee sign
+# this pipeline prints. That killed a run on a developer machine while
+# working fine in CI, where the console is UTF-8. Force UTF-8 and replace
+# anything unprintable rather than raising: a report must not die over a
+# currency symbol.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+
 HERE = Path(__file__).resolve().parent
 STATE_DIR = C.REPORTS / "_state"
 RUN_STATE = "last_run.json"
@@ -326,13 +336,25 @@ def cycle(args) -> int:
         last = ws.load_state(RUN_STATE, {}) or {}
         published = [f for f in fs.children(ws.latest, refresh=True)
                      if f["mimeType"] != DS.FOLDER_MIME]
+        # The BI sheets get the same vote as the reports. They are published
+        # in step 5, so a skipped run never creates them — which meant turning
+        # this feature on for a folder whose inputs had not changed left
+        # output/bi/ empty for ever, with the run reporting success. Whatever
+        # downstream artefact a skip claims is current has to actually exist.
+        bi_now = [f for f in fs.children(ws.bi, refresh=True)
+                  if f["mimeType"] != DS.FOLDER_MIME]
+        bi_wanted = DS.BI_EXPECTED
         log(f"\n[2] input fingerprint {fp}  (last run {last.get('fingerprint', '—')})")
-        log(f"    output/latest holds {len(published)} file(s)")
+        log(f"    output/latest holds {len(published)} file(s), "
+            f"output/bi holds {len(bi_now)}")
 
         if last.get("ok") is False:
             log("    the last run failed — rebuilding rather than skipping")
+        elif fp == last.get("fingerprint") and not args.force and bi_now and len(bi_now) < bi_wanted:
+            log(f"    output/bi has {len(bi_now)} of {bi_wanted} sheets — "
+                "rebuilding to complete it")
         elif fp == last.get("fingerprint") and not args.force:
-            if published:
+            if published and bi_now:
                 log("    unchanged since the last run — nothing to do")
                 DS.write_status(ws, ok=True, started=started, manifest=manifest,
                                 lines=["Inputs are identical to the last run. "
@@ -342,8 +364,8 @@ def cycle(args) -> int:
                                        "even if nothing has changed'."],
                                 skipped=True)
                 return 0
-            log("    inputs unchanged, but output/latest is empty — "
-                "rebuilding rather than reporting reports that are not there")
+            log("    inputs unchanged, but output/latest or output/bi is "
+                "empty — rebuilding rather than claiming they are current")
 
         if args.dry_run:
             log("\n--dry-run: would rebuild here. Stopping.")
@@ -364,12 +386,17 @@ def cycle(args) -> int:
         # So the outputs decide. If the two headline workbooks are there, the
         # build worked; the warnings are carried into STATUS.txt where someone
         # can act on them. If they are not, it really did fail.
+        # Every headline workbook, not merely one of them. A crash part-way
+        # through leaves some of them on disk, and "at least one exists" was
+        # lenient enough to publish a half-built cycle as a warning.
         built = [p.name for p in C.OUTPUT.glob("*") if p.is_file()]
-        headline = [n for n in built
-                    if DS.is_main_output(n, getattr(C, "MAIN_OUTPUTS", []))]
-        if rc != 0 and not headline:
-            raise RuntimeError(f"run_pipeline.py exited {rc} and produced no "
-                               f"report — see the notes above")
+        patterns = getattr(C, "PIPELINE_OUTPUTS", None) or getattr(C, "MAIN_OUTPUTS", [])
+        missing = [pat for pat in patterns
+                   if not any(DS.is_main_output(n, [pat]) for n in built)]
+        if rc != 0 and missing:
+            raise RuntimeError(
+                f"run_pipeline.py exited {rc} and did not produce "
+                f"{', '.join(missing)} — see the notes above")
         warned = rc != 0
         if warned:
             log(f"    run_pipeline.py exited {rc} but produced "
@@ -393,6 +420,7 @@ def cycle(args) -> int:
                                 main_patterns=getattr(C, "MAIN_OUTPUTS", []),
                                 extras_dir=getattr(C, "EXTRAS_DIR", "extras"),
                                 log=log)
+        DS.push_bi_tables(ws, C.OUTPUT, log=log)
         ws.save_state_file(STATE_DIR / ALERT_STATE)
         if C.PO_HISTORY_FILE.exists():
             ws.save_state_file(C.PO_HISTORY_FILE)

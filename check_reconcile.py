@@ -4,6 +4,7 @@ to what reconcile.py wrote into fact_sales.csv / fact_inventory.csv.
 
     python check_reconcile.py --input ./Sample --report ./report
 """
+import sys
 import argparse
 import re
 from pathlib import Path
@@ -11,13 +12,19 @@ import pandas as pd
 from reconcile import (read_csv, clean_cols, money, num, drop_total_rows,
                        EXCLUDE_DIRS, EXCLUDE_FILES, safe_to_csv)
 
+# Windows consoles default to cp1252, which cannot encode the rupee sign
+# this pipeline prints. That killed a run on a developer machine while
+# working fine in CI, where the console is UTF-8. Force UTF-8 and replace
+# anything unprintable rather than raising: a report must not die over a
+# currency symbol.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+
 R = []
 
 UNREADABLE = []
-
-
-class _Skip(Exception):
-    """find() returned nothing; the missing-file check already covers it."""
 
 
 class guard:
@@ -36,16 +43,21 @@ class guard:
         self.label, self.path = label, path
 
     def __enter__(self):
-        if self.path is None:
-            raise _Skip()
+        # Never raise from here. __exit__ is only called when __enter__
+        # succeeded, so raising to skip a missing file meant the exception
+        # escaped and killed the verifier — the exact failure this class
+        # exists to prevent. When there is no file the body raises on its
+        # own, and __exit__ swallows it below.
         return self
 
     def __exit__(self, kind, err, tb):
         if kind is None:
             return False
-        if kind is _Skip:
+        if self.path is None:
+            # find() already recorded this one in MISSING; the body blew up
+            # on a None path, which is expected and needs no second report.
             return True
-        name = self.path.name if self.path is not None else "?"
+        name = self.path.name
         UNREADABLE.append((self.label, name, f"{kind.__name__}: {err}"))
         print(f"  !! could not verify '{self.label}' from {name} "
               f"({kind.__name__}) — recorded as a failed check")
