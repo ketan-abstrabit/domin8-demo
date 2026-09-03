@@ -43,6 +43,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pipeline_config as C
+import po_history
 
 # Windows consoles default to cp1252, which cannot encode the rupee sign
 # this pipeline prints. That killed a run on a developer machine while
@@ -109,38 +110,71 @@ def date_slices(days: int, cap: int):
     return out
 
 
-def upsert_po_history(slice_files: list[Path]) -> tuple[int, int]:
-    """Merge PO slices into the persistent history file.
+def upsert_po_history(slice_files: list[Path]) -> dict:
+    """Merge PO slices into the master history file.
 
-    A PO line changes as it is received, so the newest version of each
-    (PO Code, Item SkuCode) wins. Returns (rows_before, rows_after).
+    The merge itself lives in po_history.py, because the Drive fetch path in
+    run_drive.py has to do exactly the same thing and two copies of a merge
+    rule is one copy too many.
     """
-    import pandas as pd
+    result = po_history.merge(C.PO_HISTORY_FILE, slice_files, log=say)
+    for bad in result["unreadable"]:
+        warn(f"could not read PO file — {bad}")
+    for skipped in result["ignored"]:
+        warn(f"not a purchase-order table, ignored: {skipped}")
+    return result
 
-    frames = []
-    if C.PO_HISTORY_FILE.exists():
-        try:
-            frames.append(pd.read_csv(C.PO_HISTORY_FILE, low_memory=False))
-        except Exception as exc:
-            warn(f"could not read {C.PO_HISTORY_FILE.name}: {exc}")
-    before = len(frames[0]) if frames else 0
 
-    # oldest slice first, so later (newer) rows overwrite on drop_duplicates
-    for f in sorted(slice_files, key=lambda x: x.stat().st_mtime):
-        try:
-            frames.append(pd.read_csv(f, low_memory=False))
-        except Exception as exc:
-            warn(f"could not read PO slice {f.name}: {exc}")
-    if not frames:
-        return before, before
+def consolidate_po_history():
+    """STEP 1b -- fold every PO export on hand into the one master file.
 
-    hist = pd.concat(frames, ignore_index=True)
-    key = [k for k in C.PO_HISTORY_KEY if k in hist.columns]
-    if key:
-        hist = hist.drop_duplicates(subset=key, keep="last")
-    C.PO_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    hist.to_csv(C.PO_HISTORY_FILE, index=False)
-    return before, len(hist)
+    This runs on EVERY build, not just fetch runs, and that is the point. The
+    client's normal cycle is to upload the Uniware exports by hand and press
+    Run; before this, a hand-uploaded Purchase Orders file was read for that
+    one run and then archived, so the history only ever grew when the fetch
+    button happened to be used. Purchase. qty was near-empty as a result.
+
+    After merging, the individual exports are removed from the LOCAL input
+    folder so the reconciler sees exactly one purchase-order table. Without
+    that, the same PO line would be counted twice -- once from the export,
+    once from the master -- and Purchase. qty would silently double. Nothing
+    is deleted in Drive: the client's uploads stay where they put them, and
+    re-merging them next run is harmless because the merge is keyed.
+    """
+    head("STEP 1b  purchase-order history")
+
+    slices = po_history.po_files(C.UNIWARE_DIR)
+    hist_before = C.PO_HISTORY_FILE.exists()
+
+    if not slices and not hist_before:
+        warn(f"no purchase-order data at all — {C.PO_HISTORY_FILE.name} does "
+             f"not exist and no Purchase Orders export was found. "
+             f"Purchase. qty and Overall Sell-through will be empty. Seed the "
+             f"history by dropping your full PO export into "
+             f"{C.UNIWARE_DIR.relative_to(C.ROOT)} as "
+             f"{C.PO_HISTORY_FILE.name}.")
+        return
+
+    if slices:
+        say(f"  merging {len(slices)} export(s): "
+            + ", ".join(f.name for f in slices))
+    result = upsert_po_history(slices)
+    say(f"  {po_history.describe(result)}")
+
+    # Only the files actually folded in are removed. One that could not be
+    # read stays exactly where it is: deleting it would destroy data on the
+    # strength of a parse failure, and leaving it means the reconciler still
+    # sees it and the operator still gets the warning above.
+    absorbed = result.get("absorbed") or []
+    if result.get("written") and absorbed:
+        for f in absorbed:
+            f.unlink(missing_ok=True)
+        say(f"  the {len(absorbed)} export(s) are now folded into "
+            f"{C.PO_HISTORY_FILE.name} — the reconciler reads that one file")
+    if len(absorbed) < len(slices):
+        warn(f"{len(slices) - len(absorbed)} purchase-order file(s) could not "
+             f"be merged and were left in place")
+    say(f"  master: {C.PO_HISTORY_FILE.relative_to(C.ROOT)}")
 
 # ---------------------------------------------------------------------------
 # STEP 0 -- folder tree
@@ -357,12 +391,15 @@ def fetch_uniware(args) -> bool:
 
     # PO slices never land as separate files -- dedup would keep only the newest
     # and the history would be lost. They are upserted into one history file.
-    po_slices = [f for f in pulled if "purchase_order" in f.name.lower()]
+    # Matched on a pattern that is blind to the separator. Uniware's own
+    # downloader writes "Purchase_Orders.csv"; a file the client downloaded
+    # from the UI by hand is "Purchase Orders_18082026151654.csv". The old
+    # test looked for the literal "purchase_order" and so passed over every
+    # file the client had ever uploaded.
+    po_slices = [f for f in pulled if po_history.PO_FILE_RE.search(f.stem)]
     if po_slices:
-        before, after = upsert_po_history(po_slices)
-        say(f"  PO history: {len(po_slices)} slice(s) merged — "
-            f"{before:,} -> {after:,} unique PO lines "
-            f"({C.PO_HISTORY_FILE.name})")
+        result = upsert_po_history(po_slices)
+        say(f"  PO history: {po_history.describe(result)}")
     pulled = [f for f in pulled if f not in po_slices]
 
     moved = 1 if po_slices else 0
@@ -421,6 +458,50 @@ def check_inputs():
 # ---------------------------------------------------------------------------
 # STEP 3 / 4 -- build and verify
 # ---------------------------------------------------------------------------
+
+def po_coverage():
+    """Say plainly how much of Purchase. qty is actually going to be filled in.
+
+    "The purchase order column is empty" has two quite different causes and
+    they need different people to fix them:
+
+      * the history is short -- pull a longer window, or seed the master;
+      * the SKUs are not in the master mapping table -- the merchandising
+        team has to add them.
+
+    Both used to look identical from the outside: a column of zeroes. The
+    numbers below separate them, so nobody spends a week pulling more PO
+    history to fix what is actually a mapping problem.
+    """
+    import pandas as pd
+
+    fp_path = C.OUTPUT / "fact_purchase.csv"
+    if not fp_path.exists():
+        return
+    try:
+        fp = pd.read_csv(fp_path, low_memory=False)
+    except Exception:                                            # noqa: BLE001
+        return
+    if not len(fp):
+        warn("no purchase-order lines reached the report — Purchase. qty will "
+             "be 0 for every SKU")
+        return
+
+    matched = int(fp["master_sku"].notna().sum())
+    dropped = len(fp) - matched
+    skus = fp.loc[fp["master_sku"].notna(), "master_sku"].nunique()
+
+    head("STEP 3b  purchase-order coverage")
+    say(f"  {len(fp):,} PO line(s) on file, covering {skus:,} SKU(s)")
+    if dropped:
+        unknown = fp.loc[fp["master_sku"].isna(), "external_id"].nunique()
+        warn(f"{dropped:,} PO line(s) ({unknown:,} distinct SKU codes) are for "
+             f"SKUs that are NOT in the master mapping table, so they are "
+             f"dropped and contribute nothing to Purchase. qty. They are "
+             f"listed in exceptions.csv — add them to the master to recover "
+             f"them.")
+    say(f"  history file: {C.PO_HISTORY_FILE.relative_to(C.ROOT)}")
+
 
 def run_script(script: Path, extra: list[str], label: str) -> int:
     head(label)
@@ -567,6 +648,8 @@ def main():
             warn(f"{C.UNIWARE_DIR.relative_to(C.ROOT)} is empty and --fetch was "
                  f"not passed — every Uniware-sourced number will be missing")
 
+    consolidate_po_history()
+
     have_master = check_inputs()
 
     if a.dry_run:
@@ -583,6 +666,8 @@ def main():
     if rc != 0:
         say(f"\nFAILED: reconcile.py exited {rc}")
         return 2
+
+    po_coverage()
 
     if not a.skip_verify:
         vrc = verify()

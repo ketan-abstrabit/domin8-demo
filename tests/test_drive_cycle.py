@@ -161,8 +161,13 @@ def main():
     check("working files are in extras/", len(extras) >= 6, f"{len(extras)} files")
     check("digest published", "alert_digest.html" in extras)
     check("fact tables stay out of the way", "fact_sales.csv" in extras)
-    check("nothing produced went missing", len(names) + len(extras) == 10,
+    # 11, not 10: the purchase-order master is published as a deliverable of
+    # its own now, so the client can open the full PO history without going
+    # into the folder they upload to.
+    check("nothing produced went missing", len(names) + len(extras) == 11,
           f"{len(names)} + {len(extras)}")
+    check("the purchase-order master ships as a deliverable",
+          "Purchase_Order_History.csv" in extras)
     arch = d.find(d.find(d.root_id, "output")["id"], "archive")
     cycles = [n for n in d.nodes.values()
               if not n["trashed"] and arch["id"] in n["parents"]]
@@ -172,7 +177,7 @@ def main():
           (d.find(d.find(d.root_id, "input")["id"], "reorder_status") or {})
           .get("mimeType") == FD.SHEET_MIME)
     bi = bi_sheets(d)
-    check("everything tabular published to output/bi/", len(bi) == 8,
+    check("everything tabular published to output/bi/", len(bi) == 9,
           ", ".join(sorted(bi)) or "none")
     check("the workbooks are there too, not just the facts",
           {"Stock_vs_Sales", "Alerts", "Omnichannel_Report"} <= set(bi),
@@ -282,21 +287,36 @@ def main():
     import run_drive
     fake_uni = ROOT / "_fake_uniware.py"
     fake_uni.write_text(
-        "import os, sys\n"
+        "import os, sys, json\n"
         "from pathlib import Path\n"
         "if os.environ.get('FAKE_UNIWARE_FAIL'):\n"
         "    sys.stderr.write('uniware: 503 upstream\\n'); sys.exit(3)\n"
         "out = Path(os.environ['UNIWARE_OUTDIR']) / 'stamp'\n"
         "out.mkdir(parents=True, exist_ok=True)\n"
+        # Every invocation records its own argv, so a test can assert what the
+        # window picker actually asked Uniware for rather than only what came
+        # back.
+        "calls = os.environ.get('FAKE_UNIWARE_CALLS')\n"
+        "if calls:\n"
+        "    open(calls, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
         "tag = os.environ.get('FAKE_UNIWARE_TAG', 'a')\n"
-        "for name in ['Tally GST Report', 'Purchase Orders', 'Inventory Snapshot']:\n"
+        "for name in ['Tally GST Report', 'Inventory Snapshot']:\n"
         "    (out / (name + '_' + tag + '.csv')).write_text('col\\n1\\n')\n"
+        # A real PO table, because the purchase-order path no longer just
+        # copies the file to Drive -- it parses it and merges it into the
+        # master. A stub of 'col\n1\n' would exercise the failure branch
+        # instead of the one that matters, and each tag contributes its own
+        # PO codes so the test can prove the master accumulates.
+        "(out / ('Purchase Orders_' + tag + '.csv')).write_text(\n"
+        "    'PO Code,Item SkuCode,Order Quantity,Updated\\n'\n"
+        "    'PO-' + tag + '-1,SKU-1,10,2026-01-01 00:00:00\\n'\n"
+        "    'PO-' + tag + '-2,SKU-2,20,2026-01-02 00:00:00\\n')\n"
     )
     real_script = run_drive.UNIWARE_SCRIPT
     run_drive.UNIWARE_SCRIPT = fake_uni.name
 
-    def fetch(**env):
-        args = argparse.Namespace(root_id=d.root_id, key_file=None, days=90,
+    def fetch(days=90, **env):
+        args = argparse.Namespace(root_id=d.root_id, key_file=None, days=days,
                                   fetch_timeout=60, requested_by="ops@domin8.in")
         old = {k: os.environ.get(k) for k in
                ("UNIWARE_USER", "UNIWARE_PASS", "FAKE_UNIWARE_FAIL", "FAKE_UNIWARE_TAG")}
@@ -317,12 +337,25 @@ def main():
         return sorted(n["name"] for n in d.nodes.values()
                       if not n["trashed"] and uni in n["parents"])
 
+    def po_master_text():
+        uni = d.find(d.find(d.root_id, "input")["id"], "uniware")["id"]
+        node = d.find(uni, "Purchase_Orders_history.csv")
+        return node["content"].decode() if node else ""
+
     before_uni = uniware_files()
     rc = fetch(FAKE_UNIWARE_TAG="pull1")
     after1 = uniware_files()
     check("fetch succeeds", rc == 0, f"rc={rc}")
+    # Two, not three: the Purchase Orders export is folded into the master
+    # rather than landing as a dated file of its own. Piling up one PO file
+    # per pull is what made the history impossible to read and gave the
+    # reconciler overlapping tables to add together.
     check("pulled files land in Drive input/uniware",
-          sum(1 for n in after1 if "pull1" in n) == 3, f"{len(after1)} total")
+          sum(1 for n in after1 if "pull1" in n) == 2, f"{len(after1)} total")
+    check("the purchase-order master is written to input/uniware",
+          "Purchase_Orders_history.csv" in after1)
+    check("the pulled POs are in the master",
+          "PO-pull1-1" in po_master_text() and "PO-pull1-2" in po_master_text())
     check("the client's own uploads are left alone",
           all(n in after1 for n in before_uni), f"{len(before_uni)} pre-existing")
 
@@ -331,13 +364,75 @@ def main():
     check("second fetch succeeds", rc == 0, f"rc={rc}")
     check("the previous pull is retired, not piled up",
           sum(1 for n in after2 if "pull1" in n) == 0
-          and sum(1 for n in after2 if "pull2" in n) == 3,
+          and sum(1 for n in after2 if "pull2" in n) == 2,
           ", ".join(n for n in after2 if "pull" in n))
+    # The whole point of the master. Retiring the previous pull must not
+    # retire the history along with it, and the second pull has to add to the
+    # first rather than replace it.
+    check("the master survives the retirement sweep",
+          "Purchase_Orders_history.csv" in after2)
+    master = po_master_text()
+    check("the master accumulates across pulls, it does not reset",
+          all(po in master for po in
+              ("PO-pull1-1", "PO-pull1-2", "PO-pull2-1", "PO-pull2-2")),
+          f"{len(master.splitlines()) - 1} PO lines held")
 
+    # ---- the window picker ------------------------------------------------
+    #
+    # The page lets the client choose how far back to pull. Anything over 90
+    # days cannot be one call: Uniware's date presets cap there, and a longer
+    # single request comes back quietly truncated — which is the failure mode
+    # that made Purchase. qty empty in the first place. A long window has to
+    # become a series of explicit 90-day date ranges.
+    calls_file = Path(tempfile.mkdtemp()) / "calls.jsonl"
+
+    def fetch_calls(days):
+        calls_file.write_text("")
+        rc = fetch(days=days, FAKE_UNIWARE_TAG=f"d{days}",
+                   FAKE_UNIWARE_CALLS=str(calls_file))
+        return rc, [json.loads(l) for l in
+                    calls_file.read_text().splitlines() if l.strip()]
+
+    rc, calls = fetch_calls(90)
+    check("90 days is a single call", rc == 0 and len(calls) == 1,
+          f"rc={rc}, {len(calls)} call(s)")
+    check("90 days asks by --days, not a date range",
+          "--days" in calls[0] and "--start" not in calls[0],
+          " ".join(calls[0]))
+
+    rc, calls = fetch_calls(365)
+    check("a year is split into 90-day slices", rc == 0 and len(calls) == 5,
+          f"rc={rc}, {len(calls)} slice(s)")
+    check("every slice asks for an explicit window",
+          all("--start" in c and "--end" in c for c in calls))
+    starts = [c[c.index("--start") + 1] for c in calls]
+    check("the slices do not overlap and walk backwards",
+          len(set(starts)) == len(starts) and starts == sorted(starts, reverse=True),
+          f"{starts[0]} back to {starts[-1]}")
+
+    after_year = uniware_files()
+    check("a multi-slice pull still leaves exactly one PO master",
+          sum(1 for n in after_year if n.startswith("Purchase Orders_")
+              and "d365" in n) == 0
+          and "Purchase_Orders_history.csv" in after_year)
+    # Uniware names its export for the report, not the window, so all five
+    # slices produce a file called "Tally GST Report". Uploaded under that
+    # name they would overwrite each other and four fifths of the year would
+    # be lost -- silently, since the last one to land looks perfectly fine.
+    sliced = [n for n in after_year
+              if n.startswith("Tally GST Report") and "__" in n]
+    check("same-named reports from different slices do not overwrite",
+          len(sliced) == 5, f"{len(sliced)} kept: {', '.join(sorted(sliced))[:90]}")
+
+    # Baseline taken here rather than reusing the one from the pull2 checks:
+    # the window-picker fetches above legitimately changed the folder, and the
+    # claim under test is that a FAILED fetch changes nothing from whatever
+    # the folder looked like immediately before it.
+    before_fail = uniware_files()
     rc = fetch(FAKE_UNIWARE_FAIL="1")
     after3 = uniware_files()
     check("a failed fetch reports failure", rc == 1, f"rc={rc}")
-    check("a failed fetch changes nothing in Drive", after3 == after2,
+    check("a failed fetch changes nothing in Drive", after3 == before_fail,
           f"{len(after3)} files, unchanged")
 
     state_id = d.find(d.root_id, "_state")["id"]

@@ -229,6 +229,20 @@ if p and len(fp):
     R.append({"check": "PO lines balance (ordered = received + pending + rejected)",
               "raw_file": 0, "in_report": bad, "diff": bad,
               "result": "PASS" if bad == 0 else "REVIEW"})
+    # How much of the PO ledger actually reaches the report.
+    #
+    # A PO line only contributes to Purchase. qty if its Item SkuCode is in
+    # the master mapping table. Lines for SKUs the master has never heard of
+    # are dropped -- correctly, they cannot be attributed -- but silently, and
+    # silence here reads as "the client has not bought anything" rather than
+    # "the mapping table is behind". This surfaces the split so an empty
+    # Purchase. qty column has a visible cause instead of being a mystery.
+    matched = int(fp.master_sku.notna().sum())
+    dropped = len(fp) - matched
+    R.append({"check": "PO lines matched to a SKU in the master mapping table",
+              "raw_file": len(fp), "in_report": matched, "diff": -dropped,
+              "result": "PASS" if dropped == 0 else "REVIEW"})
+
     # purchases must not leak into the sales table
     leak_po = int(fs.source_type.eq("uniware_purchase_orders").sum())
     R.append({"check": "purchase rows kept out of the sales fact table",
