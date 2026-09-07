@@ -31,19 +31,22 @@
  * page prints this in its footer and selftest reports it, so "which code is
  * actually running" is a five-second question instead of an argument.
  */
-var BUILD = '2026-09-03a  (fetch window picker)';
+var BUILD = '2026-09-03b  (fetch window picker, 90-day cap)';
 
 var EVENT_TYPE = 'run-report';
 var COOLDOWN_SECONDS = 120;
 var API = 'https://api.github.com';
 
-// Fetch window, in days. 90 is the default because it is the longest window
-// Uniware's own date presets accept in a single call; anything longer is
-// pulled as a series of 90-day slices, so it is allowed but costs time. The
-// two-year ceiling is the practical limit of what anyone would wait for.
+// Fetch window, in days. 90 is both the default and the ceiling, because it
+// is the longest window Uniware will serve — asking for more does not get
+// more, so the picker does not offer it.
+//
+// This is why the purchase-order master matters: 90 days is all any single
+// pull can ever contain, so the only routes to a full history are seeding the
+// master with the back catalogue and letting each pull add to it.
 var DEFAULT_FETCH_DAYS = 90;
 var MIN_FETCH_DAYS = 1;
-var MAX_FETCH_DAYS = 730;
+var MAX_FETCH_DAYS = 90;
 
 
 /** What the deployed code can do. The page uses this to prove it is current. */
@@ -202,12 +205,7 @@ function triggerFetch(days) {
   cache.put('fetch_cooldown', '1', COOLDOWN_SECONDS);
   console.log('uniware fetch requested by ' + (who || 'unknown') +
               ' days=' + days);
-  return {
-    ok: true,
-    message: 'Pulling the last ' + days + ' days.' +
-             (days > 90 ? ' That is more than one API window, so it runs as ' +
-                          Math.ceil(days / 90) + ' slices and takes longer.' : '')
-  };
+  return { ok: true, message: 'Pulling the last ' + days + ' days.' };
 }
 
 /** How the last Uniware pull went, from _state/last_fetch.json. */

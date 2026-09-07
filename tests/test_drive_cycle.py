@@ -379,11 +379,12 @@ def main():
 
     # ---- the window picker ------------------------------------------------
     #
-    # The page lets the client choose how far back to pull. Anything over 90
-    # days cannot be one call: Uniware's date presets cap there, and a longer
-    # single request comes back quietly truncated — which is the failure mode
-    # that made Purchase. qty empty in the first place. A long window has to
-    # become a series of explicit 90-day date ranges.
+    # The page lets the client choose how far back to pull, but 90 days is a
+    # hard ceiling: Uniware will not serve a longer window. The picker stops
+    # there, and so must this, because --days can also arrive from the CLI or
+    # a hand-edited dispatch payload. Asking for more than Uniware allows is
+    # worse than asking for less -- the request is refused, or worse, quietly
+    # truncated, and a truncated pull looks exactly like a successful one.
     calls_file = Path(tempfile.mkdtemp()) / "calls.jsonl"
 
     def fetch_calls(days):
@@ -393,36 +394,27 @@ def main():
         return rc, [json.loads(l) for l in
                     calls_file.read_text().splitlines() if l.strip()]
 
+    rc, calls = fetch_calls(30)
+    check("a shorter window is passed through", rc == 0 and len(calls) == 1
+          and "30" in calls[0], " ".join(calls[0]))
+
     rc, calls = fetch_calls(90)
-    check("90 days is a single call", rc == 0 and len(calls) == 1,
-          f"rc={rc}, {len(calls)} call(s)")
-    check("90 days asks by --days, not a date range",
-          "--days" in calls[0] and "--start" not in calls[0],
-          " ".join(calls[0]))
+    check("90 days is one call, asked by --days",
+          rc == 0 and len(calls) == 1 and "--days" in calls[0]
+          and "90" in calls[0], " ".join(calls[0]))
 
     rc, calls = fetch_calls(365)
-    check("a year is split into 90-day slices", rc == 0 and len(calls) == 5,
-          f"rc={rc}, {len(calls)} slice(s)")
-    check("every slice asks for an explicit window",
-          all("--start" in c and "--end" in c for c in calls))
-    starts = [c[c.index("--start") + 1] for c in calls]
-    check("the slices do not overlap and walk backwards",
-          len(set(starts)) == len(starts) and starts == sorted(starts, reverse=True),
-          f"{starts[0]} back to {starts[-1]}")
+    check("a window over Uniware's limit is clamped, not attempted",
+          rc == 0 and len(calls) == 1 and "90" in calls[0]
+          and "365" not in " ".join(calls[0]), " ".join(calls[0]))
+    check("the clamp is said out loud, not applied silently",
+          any("will not serve" in l for l in run_drive._log_lines))
 
     after_year = uniware_files()
-    check("a multi-slice pull still leaves exactly one PO master",
+    check("every pull leaves exactly one PO master, never a dated pile",
           sum(1 for n in after_year if n.startswith("Purchase Orders_")
               and "d365" in n) == 0
           and "Purchase_Orders_history.csv" in after_year)
-    # Uniware names its export for the report, not the window, so all five
-    # slices produce a file called "Tally GST Report". Uploaded under that
-    # name they would overwrite each other and four fifths of the year would
-    # be lost -- silently, since the last one to land looks perfectly fine.
-    sliced = [n for n in after_year
-              if n.startswith("Tally GST Report") and "__" in n]
-    check("same-named reports from different slices do not overwrite",
-          len(sliced) == 5, f"{len(sliced)} kept: {', '.join(sorted(sliced))[:90]}")
 
     # Baseline taken here rather than reusing the one from the pull2 checks:
     # the window-picker fetches above legitimately changed the folder, and the

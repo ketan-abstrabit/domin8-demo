@@ -115,17 +115,17 @@
             <button class="sec" id="fetch" onclick="fetchNow()">Fetch from Uniware</button>
             <label for="days">for the last</label>
             <select class="win" id="days">
+              <option value="7">7 days</option>
+              <option value="15">15 days</option>
               <option value="30">30 days</option>
               <option value="60">60 days</option>
               <option value="90" selected>90 days</option>
-              <option value="180">6 months</option>
-              <option value="365">1 year</option>
-              <option value="730">2 years</option>
             </select>
           </div>
-          <div class="fs">Purchase orders are added to the running history, so a
-            longer window here fills in more of <b>Purchase qty</b>. Anything over
-            90 days is pulled in 90-day slices and takes proportionally longer.</div>
+          <div class="fs">90 days is Uniware's limit, so that is the longest
+            window on offer. Purchase orders from each pull are added to the
+            running history in <b>input/uniware</b>, which is what keeps
+            <b>Purchase qty</b> filled in beyond the last 90 days.</div>
           <div class="fs" id="fetchState"></div>
         </div>
       </div>
@@ -205,9 +205,7 @@
     sel.disabled = true;
     btn.textContent = 'Pulling…';
     setFetch('Asking Uniware for the last ' + sel.options[sel.selectedIndex].text +
-             '. This takes a few minutes' +
-             (days > 90 ? ' — longer windows are pulled in 90-day slices.' : '.'),
-             false);
+             '. This takes a few minutes.', false);
 
     google.script.run
       .withSuccessHandler(function (res) {

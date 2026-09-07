@@ -176,27 +176,23 @@ def fetch_cycle(args) -> int:
     try:
         # -- 1  pull from Uniware ----------------------------------------
         #
-        # The window is whatever the client asked for, but the API's date
-        # presets stop at 90 days: ask for a year in one call and Uniware
-        # quietly hands back a quarter. So a long window becomes a series of
-        # 90-day calls with explicit start/end dates, exactly as the local
-        # pipeline already does. One pass for 90 days or fewer, which is the
-        # ordinary case and stays a single call.
-        import run_pipeline as RP
-
+        # 90 days is a hard ceiling, not a preference: Uniware will not serve
+        # a longer window. The picker on the page stops there, and so does
+        # this, because --days can also arrive from the CLI or a hand-edited
+        # dispatch and a request Uniware refuses is worse than a short one.
         cap = C.API_MAX_DAYS
-        windows = ([(None, None)] if args.days <= cap
-                   else RP.date_slices(args.days, cap))
-        log(f"\n[1] pulling {args.days} days from Uniware"
-            + (f" in {len(windows)} slices of up to {cap} days"
-               if len(windows) > 1 else ""))
+        if args.days > cap:
+            log(f"    {args.days} days requested, but Uniware will not serve "
+                f"more than {cap} — pulling {cap}")
+            args.days = cap
+        log(f"\n[1] pulling {args.days} days from Uniware")
 
         env = dict(os.environ, UNIWARE_OUTDIR=str(tmp))
         if C.FACILITY:
             env["UNIWARE_FACILITY"] = C.FACILITY
 
-        def _export(window, outdir: Path, label: str) -> str:
-            """One export pass. Returns "" on success, else the last stderr.
+        def _export() -> str:
+            """The export pass. Returns "" on success, else the last stderr.
 
             Uniware is a third party having its own day. A 5xx at the token
             endpoint is transient often enough that failing the client's
@@ -205,14 +201,12 @@ def fetch_cycle(args) -> int:
             then give up honestly. Each attempt starts a fresh export job,
             so retrying is safe.
             """
-            start, end = window
-            cmd = [sys.executable, str(HERE / UNIWARE_SCRIPT)]
-            cmd += (["--start", start, "--end", end] if start
-                    else ["--days", str(args.days)])
+            cmd = [sys.executable, str(HERE / UNIWARE_SCRIPT),
+                   "--days", str(args.days)]
             if C.FACILITY:
                 cmd += ["--facility", C.FACILITY]
 
-            pass_env = dict(env, UNIWARE_OUTDIR=str(outdir))
+            pass_env = dict(env, UNIWARE_OUTDIR=str(tmp))
             attempts, proc, last = 3, None, ""
             for attempt in range(1, attempts + 1):
                 try:
@@ -235,33 +229,15 @@ def fetch_cycle(args) -> int:
                     log("    ! " + ln)
                 if attempt < attempts:
                     wait = 30 * attempt
-                    log(f"    {label}: attempt {attempt} of {attempts} failed "
-                        f"— retrying in {wait}s")
+                    log(f"    attempt {attempt} of {attempts} failed — "
+                        f"retrying in {wait}s")
                     time.sleep(wait)
             return last or "unknown error"
 
-        failures = []
-        for i, win in enumerate(windows, 1):
-            label = (f"slice {i}/{len(windows)} {win[0]}..{win[1]}"
-                     if win[0] else "window")
-            if len(windows) > 1:
-                log(f"\n    [{label}]")
-            err = _export(win, tmp / f"w{i}", label)
-            if err:
-                failures.append((label, err))
-
+        err = _export()
         pulled = sorted(p for p in tmp.rglob("*.csv") if p.is_file())
-
-        # A slice failing is only fatal if it left us with nothing. Losing one
-        # 90-day window out of eight should not throw away the other seven —
-        # the PO master merges whatever did arrive and keeps what it already
-        # had, so a partial pull still moves the history forward.
-        if not pulled:
-            raise RuntimeError(_explain_uniware(
-                failures[-1][1] if failures else "", 3))
-        if failures:
-            log(f"\n    ! {len(failures)} of {len(windows)} slice(s) failed; "
-                f"continuing with the {len(pulled)} file(s) that did arrive")
+        if err or not pulled:
+            raise RuntimeError(_explain_uniware(err, 3))
 
         # -- 2  publish into input/uniware/ ------------------------------
         #
@@ -272,12 +248,12 @@ def fetch_cycle(args) -> int:
         uni = ws.sub["uniware"]
         uploaded = []
 
-        # Purchase orders are not uploaded as themselves. Every slice is a
-        # partial view of the same ledger, so landing eight dated PO files
-        # would give the reconciler eight overlapping tables to add up. They
-        # are folded into the one master instead, which is also what makes a
-        # multi-slice pull worth doing: the slices only become a history once
-        # they are merged.
+        # Purchase orders are not uploaded as themselves. Each pull is only
+        # the last 90 days of a ledger that goes back years, so landing one
+        # dated PO file per pull would pile up overlapping partial tables for
+        # the reconciler to add together. They are folded into the one master
+        # instead, and since 90 days is all Uniware will ever give, that merge
+        # is the only way the history grows at all.
         po_slices = [f for f in pulled if po_history.PO_FILE_RE.search(f.stem)]
         if po_slices:
             existing = STATE_DIR / C.PO_HISTORY_FILE.name
@@ -302,23 +278,7 @@ def fetch_cycle(args) -> int:
         for f in pulled:
             if f in po_slices:
                 continue
-            # Slices of the same report would otherwise overwrite each other,
-            # since Uniware names its export for the report and not for the
-            # window: five slices all produce "Tally_GST_Report.csv".
-            #
-            # The window has to come from the directory this pass was told to
-            # write into, not from the timestamped folder the exporter creates
-            # inside it — two slices launched in the same minute get the same
-            # timestamp, and only the last would survive the upload.
-            name = f.name
-            if len(windows) > 1:
-                slot = f.relative_to(tmp).parts[0]          # "w1", "w2", ...
-                try:
-                    start, end = windows[int(slot[1:]) - 1]
-                    name = f"{f.stem}__{start}_{end}{f.suffix}"
-                except (ValueError, IndexError):
-                    name = f"{f.stem}__{slot}{f.suffix}"
-            got = fs.upload(f, uni, name)
+            got = fs.upload(f, uni, f.name)
             uploaded.append({"id": got["id"], "name": got["name"]})
             log(f"      {f.stat().st_size:>10,}  {got['name']}")
 

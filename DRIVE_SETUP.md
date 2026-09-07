@@ -175,12 +175,13 @@ They get one URL. Behind it: Run now, the last run's status, and a link to the
 dashboard. They never see GitHub and never hold a credential; the token lives
 in a script you own that runs as you.
 
-The **Fetch from Uniware** button carries a window picker — 30 days up to
-2 years, defaulting to 90. It is worth using a long window once: Uniware's
-date presets cap at 90 days, so anything longer is pulled as a series of
-90-day slices, and every slice is merged into the purchase-order master. A
-one-off 2-year fetch is the fastest way to fill in `Purchase. qty` if you do
-not have a seed file to upload.
+The **Fetch from Uniware** button carries a window picker — 7 to 90 days,
+defaulting to 90. 90 is the ceiling because Uniware will not serve a longer
+window; asking for more does not get more.
+
+That ceiling is exactly why the purchase-order master exists. No single pull
+can ever contain more than 90 days, so the back catalogue has to come from a
+seed file, and everything after that accumulates 90 days at a time.
 
 **Changing `Code.gs` or `Index.html` needs a redeploy** — Deploy → Manage
 deployments → New version. Editing the files does nothing to the live app.
