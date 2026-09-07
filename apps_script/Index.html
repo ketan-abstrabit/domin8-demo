@@ -57,6 +57,17 @@
        align-items:center;gap:8px}
   .opt input{margin:0}
 
+  /* The window picker sits on the same line as the button it modifies, so it
+     reads as part of the same action rather than as a separate setting. */
+  .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .row label{color:var(--muted);font-size:13px}
+  select.win{appearance:none;border:1px solid var(--line);border-radius:8px;
+    background:#fff url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath fill='%236b7280' d='M0 0h10L5 6z'/%3E%3C/svg%3E")
+    no-repeat right 11px center;
+    color:var(--ink);font-size:14px;font-weight:500;padding:9px 30px 9px 12px;
+    cursor:pointer}
+  select.win:disabled{opacity:.45;cursor:not-allowed}
+
   .state{margin-top:18px;padding:14px 16px;border-radius:9px;font-size:14px;
          border:1px solid var(--line);background:#f9fafb;color:var(--muted)}
   .state.ok{background:var(--okbg);border-color:var(--okline);color:var(--ok)}
@@ -98,9 +109,23 @@
         <div class="n">1</div>
         <div class="s">
           <div class="t">Get the Uniware reports</div>
-          <div class="h">Optional. Pulls the last 90 days into <b>input/uniware</b>.
+          <div class="h">Optional. Pulls into <b>input/uniware</b>.
             Skip it if you would rather upload them yourself.</div>
-          <button class="sec" id="fetch" onclick="fetchNow()">Fetch from Uniware</button>
+          <div class="row">
+            <button class="sec" id="fetch" onclick="fetchNow()">Fetch from Uniware</button>
+            <label for="days">for the last</label>
+            <select class="win" id="days">
+              <option value="7">7 days</option>
+              <option value="15">15 days</option>
+              <option value="30">30 days</option>
+              <option value="60">60 days</option>
+              <option value="90" selected>90 days</option>
+            </select>
+          </div>
+          <div class="fs">90 days is Uniware's limit, so that is the longest
+            window on offer. Purchase orders from each pull are added to the
+            running history in <b>input/uniware</b>, which is what keeps
+            <b>Purchase qty</b> filled in beyond the last 90 days.</div>
           <div class="fs" id="fetchState"></div>
         </div>
       </div>
@@ -173,9 +198,14 @@
 
   function fetchNow() {
     var btn = document.getElementById('fetch');
+    var sel = document.getElementById('days');
+    var days = parseInt(sel.value, 10) || 90;
+
     btn.disabled = true;
+    sel.disabled = true;
     btn.textContent = 'Pulling…';
-    setFetch('Asking Uniware for the last 90 days. This takes a few minutes.', false);
+    setFetch('Asking Uniware for the last ' + sel.options[sel.selectedIndex].text +
+             '. This takes a few minutes.', false);
 
     google.script.run
       .withSuccessHandler(function (res) {
@@ -193,7 +223,7 @@
         setFetch(String(err && err.message || err), true);
         resetFetch();
       })
-      .triggerFetch(90);
+      .triggerFetch(days);
   }
 
   function resetFetch() {
@@ -201,6 +231,7 @@
       var b = document.getElementById('fetch');
       b.disabled = false;
       b.textContent = 'Fetch from Uniware';
+      document.getElementById('days').disabled = false;
     }, 6000);
   }
 

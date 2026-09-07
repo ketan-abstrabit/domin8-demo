@@ -31,11 +31,22 @@
  * page prints this in its footer and selftest reports it, so "which code is
  * actually running" is a five-second question instead of an argument.
  */
-var BUILD = '2026-09-01c  (fetch button)';
+var BUILD = '2026-09-03b  (fetch window picker, 90-day cap)';
 
 var EVENT_TYPE = 'run-report';
 var COOLDOWN_SECONDS = 120;
 var API = 'https://api.github.com';
+
+// Fetch window, in days. 90 is both the default and the ceiling, because it
+// is the longest window Uniware will serve — asking for more does not get
+// more, so the picker does not offer it.
+//
+// This is why the purchase-order master matters: 90 days is all any single
+// pull can ever contain, so the only routes to a full history are seeding the
+// master with the back catalogue and letting each pull add to it.
+var DEFAULT_FETCH_DAYS = 90;
+var MIN_FETCH_DAYS = 1;
+var MAX_FETCH_DAYS = 90;
 
 
 /** What the deployed code can do. The page uses this to prove it is current. */
@@ -159,6 +170,17 @@ function triggerRun(force) {
  * the five exports by hand, exactly as they do today.
  */
 function triggerFetch(days) {
+  // The window comes from a drop-down, but it arrives here as whatever the
+  // browser sent, and it ends up on a command line in the workflow. Coerce it
+  // to a whole number in a sane range rather than trusting the page: a
+  // non-integer would fail the run several minutes later with an argparse
+  // error nobody would connect back to this button.
+  var n = Math.floor(Number(days));
+  if (!isFinite(n) || n < MIN_FETCH_DAYS || n > MAX_FETCH_DAYS) {
+    n = DEFAULT_FETCH_DAYS;
+  }
+  days = n;
+
   var cache = CacheService.getScriptCache();
   if (cache.get('fetch_cooldown')) {
     return {
@@ -174,15 +196,16 @@ function triggerFetch(days) {
   try {
     gh_('post', '/repos/' + prop_('GITHUB_REPO', true) + '/dispatches', {
       event_type: 'fetch-uniware',
-      client_payload: { days: days || 90, requested_by: who }
+      client_payload: { days: days, requested_by: who }
     });
   } catch (err) {
     return { ok: false, message: String(err.message || err) };
   }
 
   cache.put('fetch_cooldown', '1', COOLDOWN_SECONDS);
-  console.log('uniware fetch requested by ' + (who || 'unknown'));
-  return { ok: true, message: 'Pulling the last ' + (days || 90) + ' days.' };
+  console.log('uniware fetch requested by ' + (who || 'unknown') +
+              ' days=' + days);
+  return { ok: true, message: 'Pulling the last ' + days + ' days.' };
 }
 
 /** How the last Uniware pull went, from _state/last_fetch.json. */

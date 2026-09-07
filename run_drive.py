@@ -39,6 +39,7 @@ from pathlib import Path
 
 import drive_sync as DS
 import pipeline_config as C
+import po_history
 
 # Windows consoles default to cp1252, which cannot encode the rupee sign
 # this pipeline prints. That killed a run on a developer machine while
@@ -174,51 +175,69 @@ def fetch_cycle(args) -> int:
     tmp = Path(tempfile.mkdtemp(prefix="uniware_"))
     try:
         # -- 1  pull from Uniware ----------------------------------------
+        #
+        # 90 days is a hard ceiling, not a preference: Uniware will not serve
+        # a longer window. The picker on the page stops there, and so does
+        # this, because --days can also arrive from the CLI or a hand-edited
+        # dispatch and a request Uniware refuses is worse than a short one.
+        cap = C.API_MAX_DAYS
+        if args.days > cap:
+            log(f"    {args.days} days requested, but Uniware will not serve "
+                f"more than {cap} — pulling {cap}")
+            args.days = cap
         log(f"\n[1] pulling {args.days} days from Uniware")
+
         env = dict(os.environ, UNIWARE_OUTDIR=str(tmp))
         if C.FACILITY:
             env["UNIWARE_FACILITY"] = C.FACILITY
-        cmd = [sys.executable, str(HERE / UNIWARE_SCRIPT), "--days", str(args.days)]
-        if C.FACILITY:
-            cmd += ["--facility", C.FACILITY]
 
-        # Uniware is a third party having its own day. A 5xx at the token
-        # endpoint is transient often enough that failing the client's button
-        # on the first one is the wrong answer — but not so often that we
-        # should retry forever, so: three tries, widening gaps, then give up
-        # honestly. Each attempt starts a fresh export job, so retrying is safe.
-        attempts, proc, last = 3, None, ""
-        for attempt in range(1, attempts + 1):
-            try:
-                proc = subprocess.run(cmd, cwd=str(HERE), env=env, text=True,
-                                      capture_output=True,
-                                      timeout=args.fetch_timeout)
-            except subprocess.TimeoutExpired:
-                raise RuntimeError(
-                    f"Uniware did not finish within {args.fetch_timeout}s. "
-                    f"Nothing was changed — the previous pull is still in "
-                    f"input/uniware/.")
+        def _export() -> str:
+            """The export pass. Returns "" on success, else the last stderr.
 
-            for ln in (proc.stdout or "").strip().splitlines()[-20:]:
-                log("    " + ln)
-            if proc.returncode == 0:
-                break
+            Uniware is a third party having its own day. A 5xx at the token
+            endpoint is transient often enough that failing the client's
+            button on the first one is the wrong answer — but not so often
+            that we should retry forever, so: three tries, widening gaps,
+            then give up honestly. Each attempt starts a fresh export job,
+            so retrying is safe.
+            """
+            cmd = [sys.executable, str(HERE / UNIWARE_SCRIPT),
+                   "--days", str(args.days)]
+            if C.FACILITY:
+                cmd += ["--facility", C.FACILITY]
 
-            last = (proc.stderr or "").strip()
-            for ln in last.splitlines()[-8:]:
-                log("    ! " + ln)
-            if attempt < attempts:
-                wait = 30 * attempt
-                log(f"    attempt {attempt} of {attempts} failed — "
-                    f"retrying in {wait}s")
-                time.sleep(wait)
+            pass_env = dict(env, UNIWARE_OUTDIR=str(tmp))
+            attempts, proc, last = 3, None, ""
+            for attempt in range(1, attempts + 1):
+                try:
+                    proc = subprocess.run(cmd, cwd=str(HERE), env=pass_env,
+                                          text=True, capture_output=True,
+                                          timeout=args.fetch_timeout)
+                except subprocess.TimeoutExpired:
+                    raise RuntimeError(
+                        f"Uniware did not finish within {args.fetch_timeout}s. "
+                        f"Nothing was changed — the previous pull is still in "
+                        f"input/uniware/.")
 
-        if proc is None or proc.returncode != 0:
-            raise RuntimeError(_explain_uniware(last, attempts))
+                for ln in (proc.stdout or "").strip().splitlines()[-20:]:
+                    log("    " + ln)
+                if proc.returncode == 0:
+                    return ""
 
+                last = (proc.stderr or "").strip()
+                for ln in last.splitlines()[-8:]:
+                    log("    ! " + ln)
+                if attempt < attempts:
+                    wait = 30 * attempt
+                    log(f"    attempt {attempt} of {attempts} failed — "
+                        f"retrying in {wait}s")
+                    time.sleep(wait)
+            return last or "unknown error"
+
+        err = _export()
         pulled = sorted(p for p in tmp.rglob("*.csv") if p.is_file())
-        if not pulled:
-            raise RuntimeError("Uniware returned no files")
+        if err or not pulled:
+            raise RuntimeError(_explain_uniware(err, 3))
 
         # -- 2  publish into input/uniware/ ------------------------------
         #
@@ -228,8 +247,38 @@ def fetch_cycle(args) -> int:
         log(f"\n[2] uploading {len(pulled)} file(s) to input/uniware/")
         uni = ws.sub["uniware"]
         uploaded = []
+
+        # Purchase orders are not uploaded as themselves. Each pull is only
+        # the last 90 days of a ledger that goes back years, so landing one
+        # dated PO file per pull would pile up overlapping partial tables for
+        # the reconciler to add together. They are folded into the one master
+        # instead, and since 90 days is all Uniware will ever give, that merge
+        # is the only way the history grows at all.
+        po_slices = [f for f in pulled if po_history.PO_FILE_RE.search(f.stem)]
+        if po_slices:
+            existing = STATE_DIR / C.PO_HISTORY_FILE.name
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            # Start from what Drive already holds, so the fetch adds to the
+            # history rather than replacing it with just this pull.
+            if not fs.download_to(uni, C.PO_HISTORY_FILE.name, existing):
+                ws.load_state_file(C.PO_HISTORY_FILE.name, existing)
+            result = po_history.merge(existing, po_slices, log=log)
+            log(f"      purchase-order master: {po_history.describe(result)}")
+            if result.get("written"):
+                got = fs.upload(existing, uni, C.PO_HISTORY_FILE.name)
+                uploaded.append({"id": got["id"], "name": got["name"]})
+                ws.save_state_file(existing, C.PO_HISTORY_FILE.name)
+                log(f"      {existing.stat().st_size:>10,}  {got['name']}")
+            # Whatever the merge could not read is uploaded as itself below,
+            # rather than being quietly discarded on the way to a master that
+            # never absorbed it.
+            po_slices = [f for f in po_slices
+                         if f in (result.get("absorbed") or [])]
+
         for f in pulled:
-            got = fs.upload(f, uni)
+            if f in po_slices:
+                continue
+            got = fs.upload(f, uni, f.name)
             uploaded.append({"id": got["id"], "name": got["name"]})
             log(f"      {f.stat().st_size:>10,}  {got['name']}")
 
@@ -314,8 +363,27 @@ def cycle(args) -> int:
                 "mapping table and this cycle's reports in and it will run.")
 
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        if ws.load_state_file(C.PO_HISTORY_FILE.name, C.PO_HISTORY_FILE):
-            log(f"    restored {C.PO_HISTORY_FILE.name} from _state/")
+
+        # The purchase-order master can arrive from two places at once: the
+        # copy in input/uniware/ that pull_inputs just brought down, and the
+        # backup in _state/. They are normally identical, but not always —
+        # the client may have just seeded input/ with their back catalogue,
+        # or may have overwritten it with something smaller by accident.
+        #
+        # So neither is allowed to win outright. Both are merged, and because
+        # the merge is keyed on (PO Code, Item SkuCode) the result is their
+        # union: a seed adds its history, and a bad upload cannot destroy what
+        # was already accumulated.
+        backup = STATE_DIR / ("_backup_" + C.PO_HISTORY_FILE.name)
+        if ws.load_state_file(C.PO_HISTORY_FILE.name, backup):
+            if C.PO_HISTORY_FILE.exists():
+                merged = po_history.merge(C.PO_HISTORY_FILE, [backup], log=log)
+                log(f"    purchase-order master: input/ copy merged with the "
+                    f"_state/ backup — {merged['after']:,} PO lines")
+            else:
+                shutil.copy2(backup, C.PO_HISTORY_FILE)
+                log(f"    restored {C.PO_HISTORY_FILE.name} from _state/")
+            backup.unlink(missing_ok=True)
         ws.load_state_file(ALERT_STATE, STATE_DIR / ALERT_STATE)
 
         # -- 2  has anything changed? ------------------------------------
@@ -416,6 +484,14 @@ def cycle(args) -> int:
 
         # -- 5  push -----------------------------------------------------
         log("\n[5] publishing to Drive")
+
+        # The master ships as a deliverable too, not just as an input the
+        # pipeline happens to keep. Copied rather than moved: the working copy
+        # in input/uniware/ is what the next run reads and what the client
+        # seeds, and it has to stay exactly where they left it.
+        if C.PO_HISTORY_FILE.exists():
+            shutil.copy2(C.PO_HISTORY_FILE, C.OUTPUT / C.PO_HISTORY_OUTPUT)
+
         links = DS.push_outputs(ws, C.OUTPUT, stamp,
                                 main_patterns=getattr(C, "MAIN_OUTPUTS", []),
                                 extras_dir=getattr(C, "EXTRAS_DIR", "extras"),
@@ -423,6 +499,12 @@ def cycle(args) -> int:
         DS.push_bi_tables(ws, C.OUTPUT, log=log)
         ws.save_state_file(STATE_DIR / ALERT_STATE)
         if C.PO_HISTORY_FILE.exists():
+            # Two copies, on purpose. input/uniware/ is the one the client
+            # owns — they seed it, they can open it, and pull_inputs brings it
+            # back next run. _state/ is the belt-and-braces copy, so that if
+            # someone tidies the input folder the accumulated history is not
+            # gone for good.
+            DS.push_po_history(ws, C.PO_HISTORY_FILE, log=log)
             ws.save_state_file(C.PO_HISTORY_FILE)
         DS.push_reorder_sheet(ws, C.REORDER_OVERRIDES, log=log)
         ws.save_state(RUN_STATE, {

@@ -175,3 +175,10 @@ PO_HISTORY_FILE = UNIWARE_DIR / "Purchase_Orders_history.csv"
 # Natural key for the upsert. A PO line changes over time (pending -> received),
 # so the newest version of each key wins.
 PO_HISTORY_KEY = ["PO Code", "Item SkuCode"]
+
+# The master is also published as a deliverable, under a name meant to be read
+# rather than parsed. Same rows as the file in input/uniware/ — that one is the
+# working copy the client seeds and the pipeline updates; this one is the copy
+# they open, and the one that becomes a Google Sheet in output/bi/ so it can be
+# charted without anybody touching the input folder.
+PO_HISTORY_OUTPUT = "Purchase_Order_History.csv"

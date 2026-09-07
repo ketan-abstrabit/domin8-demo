@@ -106,6 +106,46 @@ creates them (and then fails on the empty input, which is expected).
 Files are matched **by content, not filename**, so date-stamped exports work
 unrenamed and the subfolder names are the only thing that has to be right.
 
+### Seed the purchase-order history
+
+Do this once, and `Purchase. qty` stops being empty.
+
+Uniware's Purchase Orders export is a *window* — ask for 90 days and you get
+the POs raised in those 90 days. A SKU bought eighteen months ago has no PO in
+it, so its `Purchase. qty` is 0 and `Overall Sell-through` has no denominator.
+Nothing about pulling more often fixes that; the back catalogue has to come
+from somewhere.
+
+So the pipeline keeps a master instead:
+
+```
+input/uniware/Purchase_Orders_history.csv
+```
+
+Drop your full PO export to date in there. On the next run every PO file in
+`uniware/` is merged into it, keyed on **(PO Code, Item SkuCode)** with the
+newest version of a line winning, and the grown file is written back. It only
+ever gets bigger.
+
+Practical notes:
+
+* **Name it anything sensible.** A file is treated as purchase orders if the
+  name looks like one (`Purchase Orders...`) *or* the table has both a
+  `PO Code` and an `Item SkuCode` column. `PO master 2024-25.xlsx` works.
+* **Headers can be approximate.** `PO Number`, `SKU`, `Ordered Units` and
+  similar are mapped onto Uniware's own spellings. `.xlsx` is fine.
+* **It is safe to re-upload.** The merge is keyed, so uploading the same file
+  twice changes nothing.
+* **You cannot lose the history by uploading a bad file.** The copy in
+  `input/uniware/` and the backup in `_state/` are merged, not chosen between,
+  so a smaller or partial upload adds to the master rather than replacing it.
+
+A SKU only picks up a `Purchase. qty` if its code is in the master mapping
+table. Lines for unknown SKUs are dropped, counted in `exceptions.csv`, and
+reported as **PO lines matched to a SKU in the master mapping table** in
+`reconciliation_checks.csv` — if that check says REVIEW, the mapping table is
+behind, and no amount of extra PO history will fix it.
+
 ## 6. First run
 
 Repo → **Actions → DOMIN8 report → Run workflow**, tick **force**.
@@ -120,9 +160,10 @@ the error message names which:
 | `input/ is empty in Drive` | step 5 not done |
 | `No Google credentials` | `GOOGLE_SA_KEY` missing or not valid JSON |
 
-Then check the drive: `output/latest/` should hold ten files, `output/bi/`
-five Google Sheets, `STATUS.txt` should say `Result : OK`, and `input/` should
-have gained a `reorder_status` Google Sheet.
+Then check the drive: `output/latest/` should hold eleven files, `output/bi/`
+nine Google Sheets, `STATUS.txt` should say `Result : OK`, and `input/` should
+have gained a `reorder_status` Google Sheet and, in `uniware/`, a
+`Purchase_Orders_history.csv`.
 
 ## 7. Give the client the button
 
@@ -133,6 +174,21 @@ for the 15-minute setup.
 They get one URL. Behind it: Run now, the last run's status, and a link to the
 dashboard. They never see GitHub and never hold a credential; the token lives
 in a script you own that runs as you.
+
+The **Fetch from Uniware** button carries a window picker — 7 to 90 days,
+defaulting to 90. 90 is the ceiling because Uniware will not serve a longer
+window; asking for more does not get more.
+
+That ceiling is exactly why the purchase-order master exists. No single pull
+can ever contain more than 90 days, so the back catalogue has to come from a
+seed file, and everything after that accumulates 90 days at a time.
+
+**Changing `Code.gs` or `Index.html` needs a redeploy** — Deploy → Manage
+deployments → New version. Editing the files does nothing to the live app.
+Pipeline changes do not: the workflow checks the repo out fresh on every run,
+so anything in Python takes effect as soon as it lands on `main`. The page
+footer prints the deployed `BUILD` string, which is how you tell a stale
+deployment from a broken one.
 
 ## 8. Hand over
 
@@ -257,6 +313,7 @@ failure, and the failure-path `STATUS.txt`. 26 checks.
 input/                    the client fills this
   <master mapping table>
   uniware/
+    Purchase_Orders_history.csv   the PO master — seed it once, it grows itself
   amazon vc/
   retail stores/
   reorder_status          Google Sheet — merchandiser overrides, edited in place
@@ -269,6 +326,12 @@ _state/                   fingerprints, PO history, alert state — leave alone
 ```
 
 `_state/` is how the pipeline remembers things between runs: which alerts were
-already open (so they do not re-fire), and the accumulated purchase-order
-history that drives Ageing. Deleting it is not fatal — the next run treats
-every alert as new and rebuilds PO history from whatever window it can see.
+already open (so they do not re-fire), and a backup copy of the purchase-order
+history. Deleting it is not fatal — the next run treats every alert as new,
+and the PO master in `input/uniware/` is the working copy anyway.
+
+The PO master deliberately lives in `input/uniware/` rather than in `_state/`.
+It is the one piece of remembered state the client has to be able to reach:
+they seed it with their back catalogue, and they need to be able to open it
+and see that it is growing. `output/bi/Purchase_Order_History` is the same
+rows as a Google Sheet, for reading and charting.

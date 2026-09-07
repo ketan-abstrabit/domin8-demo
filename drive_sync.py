@@ -331,6 +331,23 @@ class DriveFS:
                 time.sleep(2 ** attempt)
         raise RuntimeError("unreachable")
 
+    def download_to(self, parent_id: str, name: str, dest: Path) -> bool:
+        """Fetch one named file out of one folder, landing it exactly at `dest`.
+
+        `download` puts the file in a directory under whatever name Drive
+        holds; callers that need a specific path had to move it afterwards.
+        That dance was written out twice, so it lives here once.
+        """
+        hit = self.find(parent_id, name, folder=False)
+        if not hit:
+            return False
+        got = self.download(hit, dest.parent)
+        if not got:
+            return False
+        if got != dest:
+            shutil.move(str(got), str(dest))
+        return True
+
     def write_text(self, parent_id: str, name: str, text: str) -> dict:
         tmp = Path(os.environ.get("TMPDIR", "/tmp")) / f"_ds_{os.getpid()}_{name}"
         tmp.parent.mkdir(parents=True, exist_ok=True)
@@ -426,13 +443,7 @@ class Workspace:
 
     def load_state_file(self, name: str, dest: Path) -> bool:
         """Pull a binary/CSV state file (PO history) down to disk."""
-        hit = self.fs.find(self.state, name, folder=False)
-        if not hit:
-            return False
-        got = self.fs.download(hit, dest.parent)
-        if got and got != dest:
-            shutil.move(str(got), str(dest))
-        return True
+        return self.fs.download_to(self.state, name, dest)
 
     def save_state_file(self, local: Path, name: str | None = None):
         if local.exists():
@@ -620,7 +631,11 @@ def tidy_latest(ws: Workspace, files, patterns, extras_dir: str, log=print):
 # The two HTML files are not tabular and are not republished; they are already
 # readable as they are.
 BI_CSV = ("fact_sales.csv", "fact_inventory.csv", "fact_purchase.csv",
-          "exceptions.csv", "reconciliation_checks.csv")
+          "exceptions.csv", "reconciliation_checks.csv",
+          # The purchase-order master. Published here as well as kept in
+          # input/uniware/ so the client can open the full PO history as a
+          # Sheet, and chart it, without going near the folder they upload to.
+          "Purchase_Order_History.csv")
 
 BI_WORKBOOKS = ("Stock_vs_Sales*.xlsx", "Alerts*.xlsx", "Omnichannel_Report*.xlsx")
 
@@ -729,6 +744,31 @@ def _take_overrides(fs: DriveFS, meta: dict, dest: Path, log=print) -> Path | No
     log(f"    merchandiser overrides -> {dest.name} "
         f"(kept out of input/, it is not a report)")
     return dest
+
+
+def push_po_history(ws: Workspace, local: Path, log=print) -> str | None:
+    """Write the purchase-order master back to input/uniware/, in place.
+
+    This is what makes the history a history. `input/` is pulled fresh at the
+    start of every run and the runner's disk is thrown away at the end, so a
+    master that is only written locally lasts exactly one cycle.
+
+    It goes back to `input/uniware/` rather than the hidden `_state/` folder
+    because the client has to be able to reach it: to seed it with their back
+    catalogue, to check it, and to see that it is growing. `upload()` matches
+    on name and updates in place, so the file ID never moves and a link to it
+    keeps working.
+
+    Uploaded as a CSV, not converted to a Sheet. The client re-uploads and
+    edits this file; a CSV round-trips through Excel and Sheets unchanged,
+    where a converted Sheet would come back with Drive's own idea of how the
+    columns should be typed.
+    """
+    if not local.exists():
+        return None
+    got = ws.fs.upload(local, ws.sub["uniware"], local.name)
+    log(f"    purchase-order master -> input/uniware/{local.name}")
+    return got.get("id")
 
 
 def push_reorder_sheet(ws: Workspace, local: Path, log=print):
