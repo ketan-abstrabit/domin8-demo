@@ -187,6 +187,48 @@ def main():
     check("published tables are Google Sheets, not CSV files",
           all(n["mimeType"] == FD.SHEET_MIME for n in bi.values()))
 
+    # ---- the workbook itself ----------------------------------------------
+    #
+    # The Drive plumbing can be perfect and the deliverable still be wrong, so
+    # these two check the workbook a person actually opens. Both are columns
+    # that were present but useless.
+    import pandas as _pd
+    svs = next(iter(sorted(C.OUTPUT.glob("Stock_vs_Sales*.xlsx"))), None)
+    if svs is None:
+        check("Stock vs Sales workbook produced", False, "not found")
+    else:
+        art = _pd.read_excel(svs, sheet_name="Article wise")
+        # 'Ageing' on the article sheet is the age of the oldest size in the
+        # style. Without a basis beside it there is no way to tell an age
+        # taken from a real purchase order from one guessed off the SKU's
+        # season code -- and that distinction decides whether the dead-stock
+        # alerts mean anything.
+        check("article sheet says how each Ageing was arrived at",
+              art["Ageing basis"].notna().all(),
+              f"{art['Ageing basis'].notna().sum()}/{len(art)} populated")
+
+        sku = _pd.read_excel(svs, sheet_name="sku wise")
+        messy = [c for c in sku.columns if isinstance(c, str)
+                 and ("\n" in c or c != c.strip())]
+        # The client's own column names are reproduced character for
+        # character, newlines included, because their filters key on them.
+        check("the deliverable keeps the client's exact column names",
+              any("\n" in c for c in messy), f"{len(messy)} verbatim header(s)")
+
+        # Looker Studio reads a field name up to the first newline, so that
+        # column binds as "Overall" and has to be renamed by hand on every
+        # data source. The BI copy is flattened; the deliverable is not.
+        import tempfile as _tf
+        flat = _pd.read_excel(
+            DS._bi_headers(svs, Path(_tf.mkdtemp())), sheet_name="sku wise")
+        check("the BI copy flattens them so a dashboard can bind",
+              not any(isinstance(c, str) and ("\n" in c or c != c.strip())
+                      for c in flat.columns)
+              and "Overall Sell-through" in list(flat.columns))
+        check("flattening headers changes nothing below row 1",
+              len(flat) == len(sku) and len(flat.columns) == len(sku.columns),
+              f"{len(sku)}x{len(sku.columns)} -> {len(flat)}x{len(flat.columns)}")
+
     print("\n[2] runs with nothing changed")
     # The first run seeds reorder_status into input/, so the run after it sees
     # a genuinely new file and rebuilds — correct, not a bug. Steady state is

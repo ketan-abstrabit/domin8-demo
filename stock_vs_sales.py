@@ -662,6 +662,26 @@ def build(input_dir: Path, report_dir: Path, asof: pd.Timestamp,
     a["Ageing"] = a["Item Name"].map(
         ((asof - g.groupby("Item Name")["_first_seen"].min()).dt.days).map(ageing_bucket))
 
+    # And how that age was arrived at. The style's Ageing is the earliest
+    # _first_seen across its sizes, so the honest basis is whichever rung of
+    # the fallback ladder produced *that* date -- carried across from the size
+    # that set it, rather than re-derived here where it could disagree with
+    # the bucket sitting next to it.
+    #
+    # This column was in the layout from the start but never populated, so the
+    # article sheet showed an Ageing with no way to tell a real receipt date
+    # from a season code guessed off the SKU. On the sku wise sheet that
+    # distinction is the difference between 1,402 SKUs aged from a purchase
+    # order and 652 aged from a naming convention.
+    dated = g.dropna(subset=["_first_seen"])
+    if len(dated):
+        oldest = dated.loc[dated.groupby("Item Name")["_first_seen"].idxmin()]
+        a["Ageing basis"] = a["Item Name"].map(
+            oldest.drop_duplicates("Item Name")
+                  .set_index("Item Name")["Ageing basis"])
+    else:
+        a["Ageing basis"] = "unknown"
+
     a["ros/month"] = a["Net sale"] / (period_days / 30.0)
     a["monthly ros"] = a["Last 15 days Sales"] * (30.0 / recent_days)
     a["For 3 months"] = a["ros/month"] * 3
