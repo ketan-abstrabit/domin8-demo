@@ -682,6 +682,47 @@ def expected_bi_names(local_output: Path) -> list[str]:
     return out
 
 
+def _bi_headers(local: Path, tmpdir: Path, log=print) -> Path:
+    """A copy of a workbook whose headers a BI tool can actually bind to.
+
+    The workbooks reproduce the client's own column names character for
+    character, newlines and trailing spaces included: their sheet really does
+    say "Overall \\nSell-through", and their filters key on it, so the
+    deliverable must not be tidied.
+
+    Looker Studio takes the text up to the first newline as the field name.
+    That column therefore arrives as "Overall", colliding with nothing and
+    meaning nothing, and every dashboard built on it has to be renamed by
+    hand. Trailing spaces are worse, because two fields can look identical
+    and not be.
+
+    So the BI copy gets flattened headers and the client's copy keeps theirs.
+    Only row 1 of each sheet is touched; every value below it is untouched.
+    """
+    import shutil as _sh
+    from openpyxl import load_workbook
+
+    out = tmpdir / local.name
+    _sh.copy2(local, out)
+    try:
+        wb = load_workbook(out)
+    except Exception as exc:                                     # noqa: BLE001
+        log(f"      ! could not flatten headers in {local.name}: {exc}")
+        return local
+    changed = 0
+    for sheet in wb.worksheets:
+        for cell in next(sheet.iter_rows(min_row=1, max_row=1), ()):
+            if isinstance(cell.value, str):
+                flat = " ".join(cell.value.split())
+                if flat != cell.value:
+                    cell.value = flat
+                    changed += 1
+    if not changed:
+        return local
+    wb.save(out)
+    return out
+
+
 def push_bi_tables(ws: Workspace, local_output: Path, log=print) -> dict:
     """Publish everything tabular to output/bi/ as Google Sheets.
 
@@ -696,7 +737,9 @@ def push_bi_tables(ws: Workspace, local_output: Path, log=print) -> dict:
         wanted += sorted(p for p in local_output.glob("*.xlsx")
                          if fnmatch(p.name, pattern))
 
+    import tempfile
     links, seen = {}, set()
+    tmpdir = Path(tempfile.mkdtemp(prefix="bi_"))
     for f in wanted:
         if not f.exists():
             log(f"      {f.name} not produced this run — skipped")
@@ -705,7 +748,8 @@ def push_bi_tables(ws: Workspace, local_output: Path, log=print) -> dict:
         if sheet in seen:
             continue
         seen.add(sheet)
-        got = ws.fs.upload(f, ws.bi, sheet, convert_to=SHEET_MIME)
+        src = _bi_headers(f, tmpdir, log=log) if f.suffix == ".xlsx" else f
+        got = ws.fs.upload(src, ws.bi, sheet, convert_to=SHEET_MIME)
         links[sheet] = f"https://docs.google.com/spreadsheets/d/{got['id']}/edit"
         log(f"      {sheet}  (Google Sheet)")
     return links

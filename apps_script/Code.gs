@@ -31,7 +31,7 @@
  * page prints this in its footer and selftest reports it, so "which code is
  * actually running" is a five-second question instead of an argument.
  */
-var BUILD = '2026-09-03b  (fetch window picker, 90-day cap)';
+var BUILD = '2026-09-03c  (fetch reports PO merge outcome)';
 
 var EVENT_TYPE = 'run-report';
 var COOLDOWN_SECONDS = 120;
@@ -219,7 +219,13 @@ function fetchStatus() {
     var j = JSON.parse(f.next().getBlob().getDataAsString());
     return {
       known: true, ok: j.ok === true, run_id: j.run_id || '',
-      files: j.files || 0, error: j.error || '', by: j.requested_by || ''
+      files: j.files || 0, error: j.error || '', by: j.requested_by || '',
+      // Purchase orders are merged into the master rather than landing as a
+      // file of their own, so the folder looks the same whether they came
+      // through or not. Reporting the line count is how the page answers
+      // that without anybody reading a run log.
+      po_lines: (typeof j.po_lines === 'number') ? j.po_lines : null,
+      warning: j.warning || ''
     };
   } catch (err) {
     return { known: false };
