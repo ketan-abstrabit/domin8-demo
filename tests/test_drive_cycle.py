@@ -349,10 +349,11 @@ def main():
         # master. A stub of 'col\n1\n' would exercise the failure branch
         # instead of the one that matters, and each tag contributes its own
         # PO codes so the test can prove the master accumulates.
-        "(out / ('Purchase Orders_' + tag + '.csv')).write_text(\n"
-        "    'PO Code,Item SkuCode,Order Quantity,Updated\\n'\n"
-        "    'PO-' + tag + '-1,SKU-1,10,2026-01-01 00:00:00\\n'\n"
-        "    'PO-' + tag + '-2,SKU-2,20,2026-01-02 00:00:00\\n')\n"
+        "if not os.environ.get('FAKE_UNIWARE_NO_PO'):\n"
+        "    (out / ('Purchase Orders_' + tag + '.csv')).write_text(\n"
+        "        'PO Code,Item SkuCode,Order Quantity,Updated\\n'\n"
+        "        'PO-' + tag + '-1,SKU-1,10,2026-01-01 00:00:00\\n'\n"
+        "        'PO-' + tag + '-2,SKU-2,20,2026-01-02 00:00:00\\n')\n"
     )
     real_script = run_drive.UNIWARE_SCRIPT
     run_drive.UNIWARE_SCRIPT = fake_uni.name
@@ -361,9 +362,11 @@ def main():
         args = argparse.Namespace(root_id=d.root_id, key_file=None, days=days,
                                   fetch_timeout=60, requested_by="ops@domin8.in")
         old = {k: os.environ.get(k) for k in
-               ("UNIWARE_USER", "UNIWARE_PASS", "FAKE_UNIWARE_FAIL", "FAKE_UNIWARE_TAG")}
+               ("UNIWARE_USER", "UNIWARE_PASS", "FAKE_UNIWARE_FAIL",
+                "FAKE_UNIWARE_TAG", "FAKE_UNIWARE_NO_PO", "FAKE_UNIWARE_CALLS")}
         os.environ.update({"UNIWARE_USER": "u", "UNIWARE_PASS": "p"})
         os.environ.pop("FAKE_UNIWARE_FAIL", None)
+        os.environ.pop("FAKE_UNIWARE_NO_PO", None)
         os.environ.update(env)
         run_drive._log_lines.clear()
         try:
@@ -457,6 +460,28 @@ def main():
           sum(1 for n in after_year if n.startswith("Purchase Orders_")
               and "d365" in n) == 0
           and "Purchase_Orders_history.csv" in after_year)
+
+    # ---- a pull that brings back no purchase orders -----------------------
+    #
+    # Uniware runs each report as its own export job, so Purchase Orders can
+    # come back empty while the other four are fine. Because POs are merged
+    # into the master instead of landing as a file, that outcome is invisible
+    # from the folder: four new files appear either way. It used to be
+    # invisible in the log too, which is exactly how a fetch that silently
+    # dropped the purchase orders would pass for a working one.
+    master_before = po_master_text()
+    rc = fetch(FAKE_UNIWARE_TAG="nopo", FAKE_UNIWARE_NO_PO="1")
+    check("a pull with no PO export still succeeds", rc == 0, f"rc={rc}")
+    check("the other reports still land",
+          sum(1 for n in uniware_files() if "nopo" in n) == 2)
+    check("and it says the purchase orders did not arrive",
+          any("no Purchase Orders export" in l for l in run_drive._log_lines))
+    check("the master is left exactly as it was, not emptied",
+          po_master_text() == master_before)
+    warned = json.loads(d.find(d.find(d.root_id, "_state")["id"],
+                               "last_fetch.json")["content"])
+    check("the page is told, so nobody has to read a run log",
+          bool(warned.get("warning")), warned.get("warning", "")[:60])
 
     # Baseline taken here rather than reusing the one from the pull2 checks:
     # the window-picker fetches above legitimately changed the folder, and the

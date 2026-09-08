@@ -255,6 +255,25 @@ def fetch_cycle(args) -> int:
         # instead, and since 90 days is all Uniware will ever give, that merge
         # is the only way the history grows at all.
         po_slices = [f for f in pulled if po_history.PO_FILE_RE.search(f.stem)]
+        po_note, po_lines = "", None
+        if not po_slices:
+            # The one outcome that used to pass in silence. Uniware runs each
+            # report as its own export job, so four can succeed and Purchase
+            # Orders fail on its own; the exporter exits non-zero and this
+            # fetch aborts, which is loud enough. But if the job "succeeds"
+            # and simply returns nothing — an export config renamed at their
+            # end, a window with no POs raised in it — the block below is
+            # skipped and the log says nothing at all about purchase orders.
+            #
+            # From the outside that is indistinguishable from a working fetch:
+            # four new files appear, the master's timestamp does not move, and
+            # nobody can tell whether the POs were merged or never arrived.
+            po_note = ("no Purchase Orders export came back from Uniware, so "
+                       "the purchase-order master was not updated by this "
+                       "fetch")
+            log(f"\n    ! {po_note}")
+            log("      the other reports landed fine and the report will "
+                "still build; Purchase. qty just gains nothing from this pull")
         if po_slices:
             existing = STATE_DIR / C.PO_HISTORY_FILE.name
             STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -263,7 +282,11 @@ def fetch_cycle(args) -> int:
             if not fs.download_to(uni, C.PO_HISTORY_FILE.name, existing):
                 ws.load_state_file(C.PO_HISTORY_FILE.name, existing)
             result = po_history.merge(existing, po_slices, log=log)
+            po_lines = result.get("after")
             log(f"      purchase-order master: {po_history.describe(result)}")
+            if result.get("written") and not result.get("added"):
+                log("      (every PO line in this pull was already on file — "
+                    "expected when the window overlaps the last one)")
             if result.get("written"):
                 got = fs.upload(existing, uni, C.PO_HISTORY_FILE.name)
                 uploaded.append({"id": got["id"], "name": got["name"]})
@@ -289,11 +312,23 @@ def fetch_cycle(args) -> int:
         # unreadable and the client cannot tell what is current. Only files
         # this tool uploaded before are removed — anything they put there by
         # hand is left alone.
+        # The purchase-order master is never retired, whatever the state file
+        # says about it. It is uploaded by the fetch, so it lands in this
+        # record like any pulled report — but it is not a pulled report, it is
+        # accumulated history that happens to travel the same way.
+        #
+        # Without this guard a fetch that brought back no Purchase Orders
+        # export would not re-upload the master, so its id would be missing
+        # from `keep`, and the sweep below would trash it: one empty PO export
+        # at Uniware's end and the client's entire seeded history is gone.
+        # Found by the test for exactly that case.
         previous = ws.load_state(PULL_STATE, {}) or {}
         keep = {u["id"] for u in uploaded}
         retired = 0
         for old in previous.get("files", []):
             if old.get("id") in keep:
+                continue
+            if old.get("name") == C.PO_HISTORY_FILE.name:
                 continue
             try:
                 fs.trash(old["id"], uni)
@@ -304,10 +339,17 @@ def fetch_cycle(args) -> int:
             log(f"      retired {retired} file(s) from the previous pull")
 
         ws.save_state(PULL_STATE, {"files": uploaded, "run_id": run_id})
+        # po_lines is here so the page can answer "did the purchase orders
+        # actually come through?" without anyone opening a run log. That
+        # question has been asked of every fetch so far, because four new
+        # files and a merged fifth look identical to four new files and a
+        # dropped fifth.
         ws.save_state(FETCH_STATE, {
             "ok": True, "run_id": run_id, "files": len(uploaded),
             "days": args.days, "requested_by": who,
             "names": [u["name"] for u in uploaded],
+            "po_lines": po_lines,
+            "warning": po_note,
         })
         log(f"\nDone. {len(uploaded)} Uniware report(s) in input/uniware/. "
             f"Press Run to build.")

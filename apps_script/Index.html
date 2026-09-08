@@ -276,8 +276,18 @@
       }
       clearInterval(fetchPoll); fetchPoll = null;
       if (f.ok) {
-        setFetch('Pulled ' + f.files + ' report(s) at ' + f.run_id +
-                 '. Now press Run.', false);
+        // Say what happened to the purchase orders explicitly. They are
+        // merged into Purchase_Orders_history.csv instead of arriving as
+        // their own file, so "4 files appeared" looks identical whether the
+        // fifth was absorbed or never came.
+        var po = f.warning
+          ? ' ' + f.warning + '.'
+          : (typeof f.po_lines === 'number'
+              ? ' Purchase orders merged — the history now holds ' +
+                f.po_lines.toLocaleString() + ' PO lines.'
+              : '');
+        setFetch('Pulled ' + f.files + ' report(s) at ' + f.run_id + '.' + po +
+                 ' Now press Run.', !!f.warning);
       } else {
         setFetch('The pull failed: ' + f.error + ' The previous files in ' +
                  'input/uniware are untouched.', true);
